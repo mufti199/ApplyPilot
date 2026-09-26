@@ -402,9 +402,25 @@ def jobs(
 
 
 @app.command()
-def dashboard() -> None:
-    """Generate and open the HTML dashboard in your browser."""
+def dashboard(
+    serve: bool = typer.Option(False, "--serve", help="Run a live dashboard that updates during a run."),
+    port: int = typer.Option(8765, "--port", help="Port for --serve (localhost only)."),
+    no_open: bool = typer.Option(False, "--no-open", help="With --serve, don't open a browser tab."),
+) -> None:
+    """Open the dashboard: a static snapshot, or a live local server with --serve."""
     _bootstrap()
+
+    if serve:
+        if not 1024 <= port <= 65535:
+            console.print("[red]--port must be between 1024 and 65535.[/red]")
+            raise typer.Exit(code=1)
+        from applypilot.dashboard_server import serve as run_server
+        try:
+            run_server(port=port, open_browser=not no_open)
+        except OSError as e:
+            console.print(f"[red]Could not start dashboard on port {port}:[/red] {e}")
+            raise typer.Exit(code=1) from e
+        return
 
     from applypilot.view import open_dashboard
 
