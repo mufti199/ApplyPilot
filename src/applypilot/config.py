@@ -2,6 +2,7 @@
 
 import os
 import platform
+import re
 import shutil
 from pathlib import Path
 
@@ -163,6 +164,51 @@ def get_preferred_locations(search_cfg: dict | None) -> list[str]:
     if any(not p for p in patterns):
         raise ValueError("location_preferred must not contain blank entries")
     return patterns
+
+
+_TRACK_NAME_RE = r"^[a-z0-9_-]+$"
+
+
+def get_resume_tracks(search_cfg: dict | None) -> dict[str, dict[str, Path | None]]:
+    """Return the resume tracks: {track_name: {"text": Path, "pdf": Path | None}}.
+
+    Reads the optional `resumes` mapping from the search config, e.g.
+        resumes:
+          software: {text: ".../resume_software.txt", pdf: ".../resume.pdf"}
+    Without it, falls back to a single "default" track using resume.txt/.pdf.
+
+    Raises:
+        TypeError: if the setting has the wrong shape.
+        ValueError: if a track name is invalid or a text path is missing.
+        FileNotFoundError: if a configured file does not exist.
+    """
+    raw = (search_cfg or {}).get("resumes")
+    if raw is None:
+        pdf = RESUME_PDF_PATH if RESUME_PDF_PATH.exists() else None
+        return {"default": {"text": RESUME_PATH, "pdf": pdf}}
+    if not isinstance(raw, dict) or not raw:
+        raise TypeError("resumes must be a non-empty mapping of track name to {text, pdf}")
+
+    tracks: dict[str, dict[str, Path | None]] = {}
+    for name, entry in raw.items():
+        if not isinstance(name, str) or not re.match(_TRACK_NAME_RE, name):
+            raise ValueError(f"Invalid resume track name {name!r}: use lowercase letters, digits, - or _")
+        if not isinstance(entry, dict):
+            raise TypeError(f"resumes.{name} must be a mapping with 'text' and optional 'pdf'")
+        text = entry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"resumes.{name}.text must be a file path")
+        pdf = entry.get("pdf")
+        if pdf is not None and not isinstance(pdf, str):
+            raise TypeError(f"resumes.{name}.pdf must be a file path")
+
+        text_path = Path(text).expanduser()
+        pdf_path = Path(pdf).expanduser() if pdf else None
+        for label, path in (("text", text_path), ("pdf", pdf_path)):
+            if path is not None and not path.is_file():
+                raise FileNotFoundError(f"resumes.{name}.{label} not found: {path}")
+        tracks[name] = {"text": text_path, "pdf": pdf_path}
+    return tracks
 
 
 def load_sites_config() -> dict:

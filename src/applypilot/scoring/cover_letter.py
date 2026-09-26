@@ -19,7 +19,7 @@ from applypilot.config import (
     load_search_config,
 )
 from applypilot.database import get_connection, get_jobs_by_stage, preferred_location_order
-from applypilot.llm import get_client
+from applypilot.llm import DailyQuotaExceeded, get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     LLM_LEAK_PHRASES,
@@ -275,6 +275,10 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
                 "%d/%d [OK] | %.1f jobs/min | %s",
                 completed, len(jobs), rate * 60, result["title"][:40],
             )
+        except DailyQuotaExceeded as e:
+            # Not counted as an attempt: the job is retried on the next run.
+            log.error("Cover letters stopped: %s (%d/%d done)", e, completed - 1, len(jobs))
+            break
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],

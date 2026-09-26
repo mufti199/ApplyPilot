@@ -162,6 +162,7 @@ _ALL_COLUMNS: dict[str, str] = {
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",
     "scored_at": "TEXT",
+    "resume_track": "TEXT",
     # Tailoring
     "tailored_resume_path": "TEXT",
     "tailored_at": "TEXT",
