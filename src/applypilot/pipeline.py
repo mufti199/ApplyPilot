@@ -21,8 +21,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from applypilot.config import load_env, ensure_dirs, get_discovery_sources, load_search_config
-from applypilot.database import init_db, get_connection, get_stats
+from applypilot.config import (
+    ensure_dirs,
+    get_discovery_sources,
+    get_resume_tracks,
+    get_tailor_resumes,
+    load_env,
+    load_search_config,
+)
+from applypilot.database import cover_letter_pending_where, get_connection, get_stats, init_db
 
 log = logging.getLogger(__name__)
 console = Console()
@@ -53,6 +60,18 @@ _UPSTREAM: dict[str, str | None] = {
     "cover":    "tailor",
     "pdf":      "cover",
 }
+
+
+def _tailoring_enabled() -> bool:
+    """Read `tailor_resumes` from searches.yaml (default true)."""
+    return get_tailor_resumes(load_search_config())
+
+
+def _upstream(stage: str, tailoring: bool) -> str | None:
+    """Upstream stage; with tailoring off, cover letters follow scoring directly."""
+    if stage == "cover" and not tailoring:
+        return "score"
+    return _UPSTREAM[stage]
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +211,17 @@ _STAGE_RUNNERS: dict[str, callable] = {
 # Stage resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_stages(stage_names: list[str]) -> list[str]:
-    """Resolve 'all' and validate/order stage names."""
+def _resolve_stages(stage_names: list[str], tailoring: bool = True) -> list[str]:
+    """Resolve 'all' and validate/order stage names.
+
+    With tailoring off, 'all' leaves out the tailor stage; naming it
+    explicitly still runs it.
+    """
     if "all" in stage_names:
-        return list(STAGE_ORDER)
+        if tailoring:
+            return list(STAGE_ORDER)
+        log.info("Tailor stage skipped (tailor_resumes: false in searches.yaml)")
+        return [s for s in STAGE_ORDER if s != "tailor"]
 
     resolved = []
     for name in stage_names:
@@ -252,11 +278,6 @@ _PENDING_SQL: dict[str, str] = {
         "AND tailored_resume_path IS NULL "
         "AND COALESCE(tailor_attempts, 0) < 5"
     ),
-    "cover": (
-        "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
-        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < 5"
-    ),
     "pdf": (
         "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
         "AND tailored_resume_path LIKE '%.txt'"
@@ -269,6 +290,8 @@ _STREAM_POLL_INTERVAL = 10
 
 def _count_pending(stage: str, min_score: int = 7) -> int:
     """Count pending work items for a stage."""
+    if stage == "cover":
+        return _count_pending_cover(min_score)
     sql = _PENDING_SQL.get(stage)
     if sql is None:
         return 0
@@ -276,6 +299,17 @@ def _count_pending(stage: str, min_score: int = 7) -> int:
     if "?" in sql:
         return conn.execute(sql, (min_score,)).fetchone()[0]
     return conn.execute(sql).fetchone()[0]
+
+
+def _count_pending_cover(min_score: int) -> int:
+    """Cover letters pending, using the same rule as the cover stage itself."""
+    from applypilot.scoring.cover_letter import MAX_ATTEMPTS
+
+    cfg = load_search_config()
+    where, params = cover_letter_pending_where(
+        min_score, MAX_ATTEMPTS, get_tailor_resumes(cfg), list(get_resume_tracks(cfg)),
+    )
+    return get_connection().execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0]
 
 
 def _run_stage_streaming(
@@ -300,7 +334,7 @@ def _run_stage_streaming(
     if stage in ("discover", "enrich"):
         kwargs["workers"] = workers
 
-    upstream = _UPSTREAM[stage]
+    upstream = _upstream(stage, _tailoring_enabled())
 
     if stage == "discover":
         # Discover runs once (its sub-scrapers already do their full crawl)
@@ -492,7 +526,12 @@ def run_pipeline(
     # Resolve stages
     if stages is None:
         stages = ["all"]
-    ordered = _resolve_stages(stages)
+    try:
+        tailoring = _tailoring_enabled()
+    except TypeError as e:
+        console.print(f"[red]Config error:[/red] {e}")
+        raise SystemExit(1) from e
+    ordered = _resolve_stages(stages, tailoring)
 
     # Banner
     mode = "streaming" if stream else "sequential"

@@ -363,6 +363,28 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     return new, existing
 
 
+def cover_letter_pending_where(min_score: int, max_attempts: int, tailoring: bool,
+                               tracks: list[str]) -> tuple[str, list]:
+    """WHERE clause (and params) for jobs that still need a cover letter.
+
+    With tailoring on, a job also needs its tailored resume first. With more
+    than one resume track, the job's resume_track must be one of them (jobs
+    scored before tracks existed are left out until re-scored).
+    """
+    where = (
+        "fit_score >= ? AND full_description IS NOT NULL "
+        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
+        "AND COALESCE(cover_attempts, 0) < ?"
+    )
+    params: list = [min_score, max_attempts]
+    if tailoring:
+        where += " AND tailored_resume_path IS NOT NULL"
+    if len(tracks) > 1:
+        where += f" AND resume_track IN ({','.join('?' * len(tracks))})"
+        params.extend(tracks)
+    return where, params
+
+
 def preferred_location_order(patterns: list[str]) -> tuple[str, list[str]]:
     """Build an ORDER BY term that puts jobs in preferred locations first.
 

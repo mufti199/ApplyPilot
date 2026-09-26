@@ -5,20 +5,21 @@ postings. All personal data (name, skills, achievements) comes from the user's
 profile at runtime. No hardcoded personal information.
 """
 
-import json
+import hashlib
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from applypilot.config import (
     COVER_LETTER_DIR,
-    RESUME_PATH,
     get_preferred_locations,
+    get_resume_tracks,
+    get_tailor_resumes,
     load_profile,
     load_search_config,
 )
-from applypilot.database import get_connection, get_jobs_by_stage, preferred_location_order
+from applypilot.database import cover_letter_pending_where, get_connection, preferred_location_order
 from applypilot.llm import DailyQuotaExceeded, get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -193,7 +194,10 @@ def generate_cover_letter(
 
 def run_cover_letters(min_score: int = 7, limit: int = 20,
                       validation_mode: str = "normal") -> dict:
-    """Generate cover letters for high-scoring jobs that have tailored resumes.
+    """Generate cover letters for high-scoring jobs, using each job's resume track.
+
+    With tailoring on (`tailor_resumes: true`), only jobs with a tailored resume
+    are eligible. Each letter is saved as soon as it is written.
 
     Args:
         min_score:       Minimum fit_score threshold.
@@ -201,116 +205,118 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
         validation_mode: "strict", "normal", or "lenient".
 
     Returns:
-        {"generated": int, "errors": int, "elapsed": float}
+        {"generated": int, "errors": int, "skipped_no_track": int, "elapsed": float}
     """
     profile = load_profile()
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    search_cfg = load_search_config()
+    tracks = get_resume_tracks(search_cfg)
+    resumes = {name: t["text"].read_text(encoding="utf-8") for name, t in tracks.items()}
     conn = get_connection()
 
-    # Fetch jobs that have tailored resumes but no cover letter yet
-    loc_order, loc_params = preferred_location_order(get_preferred_locations(load_search_config()))
-    jobs = conn.execute(
-        "SELECT * FROM jobs "
-        "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
-        "AND full_description IS NOT NULL "
-        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < ? "
-        f"ORDER BY fit_score DESC, {loc_order} LIMIT ?",
-        (min_score, MAX_ATTEMPTS, *loc_params, limit),
+    tailoring = get_tailor_resumes(search_cfg)
+    where, params = cover_letter_pending_where(min_score, MAX_ATTEMPTS, tailoring, list(tracks))
+    loc_order, loc_params = preferred_location_order(get_preferred_locations(search_cfg))
+    rows = conn.execute(
+        f"SELECT * FROM jobs WHERE {where} ORDER BY fit_score DESC, {loc_order} LIMIT ?",
+        (*params, *loc_params, limit),
     ).fetchall()
+    jobs = [dict(row) for row in rows]
+    no_track = _count_missing_track(conn, min_score, tailoring, list(tracks))
+    if no_track:
+        log.warning("%d jobs above score %d have no resume track; re-score them to get cover letters.",
+                    no_track, min_score)
 
     if not jobs:
         log.info("No jobs needing cover letters (score >= %d).", min_score)
-        return {"generated": 0, "errors": 0, "elapsed": 0.0}
-
-    # Convert rows to dicts
-    if jobs and not isinstance(jobs[0], dict):
-        columns = jobs[0].keys()
-        jobs = [dict(zip(columns, row)) for row in jobs]
+        return {"generated": 0, "errors": 0, "skipped_no_track": no_track, "elapsed": 0.0}
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
-    log.info(
-        "Generating cover letters for %d jobs (score >= %d)...",
-        len(jobs), min_score,
-    )
+    log.info("Generating cover letters for %d jobs (score >= %d)...", len(jobs), min_score)
     t0 = time.time()
-    completed = 0
-    results: list[dict] = []
+    saved = 0
     error_count = 0
 
-    for job in jobs:
-        completed += 1
+    for i, job in enumerate(jobs, start=1):
         try:
+            resume_text = _resume_for_job(job, resumes)
             letter = generate_cover_letter(resume_text, job, profile,
-                                          validation_mode=validation_mode)
-
-            # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
-
-            cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+                                           validation_mode=validation_mode)
+            cl_path = COVER_LETTER_DIR / f"{_file_prefix(job)}_CL.txt"
             cl_path.write_text(letter, encoding="utf-8")
-
-            # Generate PDF (best-effort)
-            pdf_path = None
-            try:
-                from applypilot.scoring.pdf import convert_to_pdf
-                pdf_path = str(convert_to_pdf(cl_path))
-            except Exception:
-                log.debug("PDF generation failed for %s", cl_path, exc_info=True)
-
-            result = {
-                "url": job["url"],
-                "path": str(cl_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-            }
-            results.append(result)
-
-            elapsed = time.time() - t0
-            rate = completed / elapsed if elapsed > 0 else 0
-            log.info(
-                "%d/%d [OK] | %.1f jobs/min | %s",
-                completed, len(jobs), rate * 60, result["title"][:40],
-            )
+            _save_pdf_best_effort(cl_path)
         except DailyQuotaExceeded as e:
             # Not counted as an attempt: the job is retried on the next run.
-            log.error("Cover letters stopped: %s (%d/%d done)", e, completed - 1, len(jobs))
+            log.error("Cover letters stopped: %s (%d/%d done)", e, i - 1, len(jobs))
             break
         except Exception as e:
-            result = {
-                "url": job["url"], "title": job["title"], "site": job["site"],
-                "path": None, "pdf_path": None, "error": str(e),
-            }
             error_count += 1
-            results.append(result)
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
+            _record_attempt(conn, job["url"], None)
+            log.error("%d/%d [ERROR] %s -- %s", i, len(jobs), job["title"][:40], e)
+            continue
 
-    # Persist to DB: increment attempt counter for ALL, save path only for successes
-    now = datetime.now(timezone.utc).isoformat()
-    saved = 0
-    for r in results:
-        if r.get("path"):
-            conn.execute(
-                "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
-                "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-            saved += 1
-        else:
-            conn.execute(
-                "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
+        _record_attempt(conn, job["url"], str(cl_path))
+        saved += 1
+        log.info("%d/%d [OK] track=%s | %s", i, len(jobs), job.get("resume_track"), job["title"][:40])
 
     elapsed = time.time() - t0
     log.info("Cover letters done in %.1fs: %d generated, %d errors", elapsed, saved, error_count)
+    return {"generated": saved, "errors": error_count, "skipped_no_track": no_track, "elapsed": elapsed}
 
-    return {
-        "generated": saved,
-        "errors": error_count,
-        "elapsed": elapsed,
-    }
+
+def _resume_for_job(job: dict, resumes: dict[str, str]) -> str:
+    """Resume text for the job's track; a single-track setup always uses its one resume.
+
+    The pending query only returns jobs with a known track when there are
+    several, so a miss here means the data changed underneath us.
+    """
+    if len(resumes) == 1:
+        return next(iter(resumes.values()))
+    track = job.get("resume_track")
+    if track not in resumes:
+        raise ValueError(f"Job has unknown resume track {track!r}; expected one of {list(resumes)}")
+    return resumes[track]
+
+
+def _count_missing_track(conn, min_score: int, tailoring: bool, tracks: list[str]) -> int:
+    """Jobs that would need a letter but are excluded for lacking a known resume track."""
+    if len(tracks) <= 1:
+        return 0
+    where, params = cover_letter_pending_where(min_score, MAX_ATTEMPTS, tailoring, [])
+    marks = ",".join("?" * len(tracks))
+    return conn.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE {where} AND (resume_track IS NULL OR resume_track NOT IN ({marks}))",
+        (*params, *tracks),
+    ).fetchone()[0]
+
+
+def _file_prefix(job: dict) -> str:
+    """Filename prefix: site + title + short URL hash, so same-title jobs don't collide."""
+    safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
+    safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
+    url_id = hashlib.sha1(job["url"].encode("utf-8")).hexdigest()[:8]
+    return f"{safe_site}_{safe_title}_{url_id}"
+
+
+def _save_pdf_best_effort(cl_path) -> None:
+    """Render the letter to PDF; a failure is logged but doesn't lose the .txt."""
+    try:
+        from applypilot.scoring.pdf import convert_to_pdf
+        convert_to_pdf(cl_path)
+    except Exception:
+        log.warning("PDF generation failed for %s", cl_path, exc_info=True)
+
+
+def _record_attempt(conn, url: str, path: str | None) -> None:
+    """Count an attempt and, on success, store the letter path. Commits immediately."""
+    if path:
+        conn.execute(
+            "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
+            "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+            (path, datetime.now(UTC).isoformat(), url),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+            (url,),
+        )
+    conn.commit()

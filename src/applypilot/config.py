@@ -166,6 +166,18 @@ def get_preferred_locations(search_cfg: dict | None) -> list[str]:
     return patterns
 
 
+def get_tailor_resumes(search_cfg: dict | None) -> bool:
+    """Return whether the pipeline tailors a resume per job (`tailor_resumes`, default true).
+
+    Raises:
+        TypeError: if the setting is not true/false.
+    """
+    value = (search_cfg or {}).get("tailor_resumes", True)
+    if not isinstance(value, bool):
+        raise TypeError(f"tailor_resumes must be true or false, got {value!r}")
+    return value
+
+
 _TRACK_NAME_RE = r"^[a-z0-9_-]+$"
 
 

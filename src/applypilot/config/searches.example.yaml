@@ -93,6 +93,10 @@ boards:
   - zip_recruiter
   - google
 
+# Rewrite your resume for each job (default true). With false, the tailor
+# stage is skipped and cover letters use your resume as-is.
+tailor_resumes: true
+
 # Discovery sources to run (all default to true when omitted)
 discovery_sources:
   jobspy: true        # Indeed, LinkedIn, etc. via JobSpy
