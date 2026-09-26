@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
-from applypilot.database import get_connection
+from applypilot.database import get_connection, preferred_location_order
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
@@ -99,6 +99,9 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
     Returns:
         Job dict or None if the queue is empty.
     """
+    loc_order, loc_params = preferred_location_order(
+        config.get_preferred_locations(config.load_search_config())
+    )
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -137,9 +140,9 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
-                ORDER BY fit_score DESC, url
+                ORDER BY fit_score DESC, {loc_order}, url
                 LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+            """, [config.DEFAULTS["max_apply_attempts"]] + params + loc_params).fetchone()
 
         if not row:
             conn.rollback()

@@ -11,8 +11,14 @@ import re
 import time
 from datetime import datetime, timezone
 
-from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.config import (
+    COVER_LETTER_DIR,
+    RESUME_PATH,
+    get_preferred_locations,
+    load_profile,
+    load_search_config,
+)
+from applypilot.database import get_connection, get_jobs_by_stage, preferred_location_order
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -202,14 +208,15 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     conn = get_connection()
 
     # Fetch jobs that have tailored resumes but no cover letter yet
+    loc_order, loc_params = preferred_location_order(get_preferred_locations(load_search_config()))
     jobs = conn.execute(
         "SELECT * FROM jobs "
         "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
         "AND full_description IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < ? "
-        "ORDER BY fit_score DESC LIMIT ?",
-        (min_score, MAX_ATTEMPTS, limit),
+        f"ORDER BY fit_score DESC, {loc_order} LIMIT ?",
+        (min_score, MAX_ATTEMPTS, *loc_params, limit),
     ).fetchall()
 
     if not jobs:

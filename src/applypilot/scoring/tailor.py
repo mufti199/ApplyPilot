@@ -16,7 +16,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
+from applypilot.config import (
+    RESUME_PATH,
+    TAILORED_DIR,
+    get_preferred_locations,
+    load_profile,
+    load_search_config,
+)
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -471,7 +477,9 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
-    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
+    preferred = get_preferred_locations(load_search_config())
+    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit,
+                             preferred_locations=preferred)
 
     if not jobs:
         log.info("No untailored jobs with score >= %d.", min_score)

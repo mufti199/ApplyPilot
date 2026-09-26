@@ -362,10 +362,26 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     return new, existing
 
 
+def preferred_location_order(patterns: list[str]) -> tuple[str, list[str]]:
+    """Build an ORDER BY term that puts jobs in preferred locations first.
+
+    Returns (sql, params). The SQL evaluates to 0 for a job whose location
+    contains any pattern (case-insensitive) and 1 otherwise. With no
+    patterns it is NULL, so ordering is unchanged (a bare integer would be
+    read by SQLite as a column position).
+    """
+    if not patterns:
+        return "NULL", []
+    escaped = [p.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for p in patterns]
+    clauses = " OR ".join("LOWER(COALESCE(location, '')) LIKE ? ESCAPE '\\'" for _ in escaped)
+    return f"(CASE WHEN {clauses} THEN 0 ELSE 1 END)", [f"%{p}%" for p in escaped]
+
+
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
                       stage: str = "discovered",
                       min_score: int | None = None,
-                      limit: int = 100) -> list[dict]:
+                      limit: int = 100,
+                      preferred_locations: list[str] | None = None) -> list[dict]:
     """Fetch jobs filtered by pipeline stage.
 
     Args:
@@ -373,6 +389,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         stage: One of "discovered", "enriched", "scored", "tailored", "applied".
         min_score: Minimum fit_score filter (only relevant for scored+ stages).
         limit: Maximum number of rows to return.
+        preferred_locations: Location patterns that win ties on fit_score.
 
     Returns:
         List of job dicts.
@@ -410,7 +427,13 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         where += " AND fit_score >= ?"
         params.append(min_score)
 
-    query = f"SELECT * FROM jobs WHERE {where} ORDER BY fit_score DESC NULLS LAST, discovered_at DESC"
+    loc_order, loc_params = preferred_location_order(preferred_locations or [])
+    params.extend(loc_params)
+
+    query = (
+        f"SELECT * FROM jobs WHERE {where} "
+        f"ORDER BY fit_score DESC NULLS LAST, {loc_order}, discovered_at DESC"
+    )
     if limit > 0:
         query += " LIMIT ?"
         params.append(limit)

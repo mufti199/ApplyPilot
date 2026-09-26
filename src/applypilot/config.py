@@ -144,6 +144,27 @@ def get_discovery_sources(search_cfg: dict | None) -> dict[str, bool]:
     return enabled
 
 
+def get_preferred_locations(search_cfg: dict | None) -> list[str]:
+    """Return the `location_preferred` patterns from the search config.
+
+    Jobs whose location contains one of these (case-insensitive) are handled
+    first among jobs with the same fit score. Missing setting -> [].
+
+    Raises:
+        TypeError: if the setting is not a list of strings.
+        ValueError: if a pattern is blank.
+    """
+    raw = (search_cfg or {}).get("location_preferred")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+        raise TypeError("location_preferred must be a list of strings")
+    patterns = [p.strip() for p in raw]
+    if any(not p for p in patterns):
+        raise ValueError("location_preferred must not contain blank entries")
+    return patterns
+
+
 def load_sites_config() -> dict:
     """Load sites.yaml configuration (sites list, manual_ats, blocked, etc.)."""
     import yaml
