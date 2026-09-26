@@ -137,6 +137,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 WHERE tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status = 'failed')
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
+                  AND tracking_status IS NULL
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}

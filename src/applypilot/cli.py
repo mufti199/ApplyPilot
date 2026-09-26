@@ -323,6 +323,69 @@ def status() -> None:
 
 
 @app.command()
+def mark(
+    job: str = typer.Argument(..., help="Job number (from 'applypilot jobs') or the job's URL."),
+    status: str = typer.Argument(..., help="applied, skipped, interviewing, rejected, offer, cold-call, or clear."),
+) -> None:
+    """Record your own status for a job you handle yourself."""
+    _bootstrap()
+
+    from applypilot.database import TRACKING_STATUSES, set_tracking_status
+
+    status = status.strip().lower()
+    if status not in (*TRACKING_STATUSES, "clear"):
+        console.print(f"[red]Unknown status '{status}'.[/red] Use: {', '.join(TRACKING_STATUSES)}, clear")
+        raise typer.Exit(code=1)
+    try:
+        found = set_tracking_status(job, None if status == "clear" else status)
+    except LookupError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    label = "cleared" if status == "clear" else status
+    log.info("Tracking status %s for job %s (%s)", label, found["id"], found["url"])
+    console.print(f"[green]#{found['id']} {found['title']}[/green] -> {label}")
+
+
+@app.command()
+def jobs(
+    min_score: int = typer.Option(7, "--min-score", help="Only jobs with at least this fit score."),
+    status: Optional[str] = typer.Option(None, "--status", help="Only jobs with this status ('none' = untracked)."),
+    limit: int = typer.Option(30, "--limit", "-l", help="Max rows to show."),
+) -> None:
+    """List scored jobs with their numbers, for use with 'applypilot mark'."""
+    _bootstrap()
+
+    from applypilot.database import TRACKING_STATUSES, get_connection
+
+    where, params = ["fit_score >= ?"], [min_score]
+    if status:
+        status = status.strip().lower()
+        if status == "none":
+            where.append("tracking_status IS NULL")
+        elif status in TRACKING_STATUSES:
+            where.append("tracking_status = ?")
+            params.append(status)
+        else:
+            console.print(f"[red]Unknown status '{status}'.[/red] Use: {', '.join(TRACKING_STATUSES)}, none")
+            raise typer.Exit(code=1)
+
+    rows = get_connection().execute(
+        f"SELECT rowid AS id, fit_score, resume_track, tracking_status, title, site, location "
+        f"FROM jobs WHERE {' AND '.join(where)} ORDER BY fit_score DESC, rowid LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+
+    table = Table(show_header=True, header_style="bold cyan")
+    for col in ("#", "Score", "Track", "Status", "Title", "Site", "Location"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(str(r["id"]), str(r["fit_score"]), r["resume_track"] or "-",
+                      r["tracking_status"] or "-", (r["title"] or "")[:50], r["site"] or "", r["location"] or "")
+    console.print(table if rows else "[dim]No matching jobs.[/dim]")
+
+
+@app.command()
 def dashboard() -> None:
     """Generate and open the HTML dashboard in your browser."""
     _bootstrap()

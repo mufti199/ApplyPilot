@@ -181,7 +181,13 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_duration_ms": "INTEGER",
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
+    # Manual tracking (set by the user, not the auto-apply agent)
+    "tracking_status": "TEXT",
+    "tracking_updated_at": "TEXT",
 }
+
+# Statuses a user can record for a job they handle themselves.
+TRACKING_STATUSES = ("applied", "skipped", "interviewing", "rejected", "offer", "cold-call")
 
 
 def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
@@ -361,6 +367,52 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
 
     conn.commit()
     return new, existing
+
+
+def find_job(ref: str, conn: sqlite3.Connection | None = None) -> dict | None:
+    """Look up a job by its number (SQLite rowid) or by its URL / application URL."""
+    if conn is None:
+        conn = get_connection()
+    ref = ref.strip()
+    if ref.isdigit():
+        row = conn.execute("SELECT rowid AS id, * FROM jobs WHERE rowid = ?", (int(ref),)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT rowid AS id, * FROM jobs WHERE url = ? OR application_url = ? LIMIT 1", (ref, ref),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_tracking_status(ref: str, status: str | None,
+                        conn: sqlite3.Connection | None = None) -> dict:
+    """Record the user's own status for a job (None clears it).
+
+    Marking 'applied' also sets applied_at (if unset) so pipeline stats count it.
+
+    Returns:
+        The job row as it was found (with its id).
+
+    Raises:
+        ValueError: unknown status.
+        LookupError: no job matches ref.
+    """
+    if status is not None and status not in TRACKING_STATUSES:
+        raise ValueError(f"Unknown status {status!r}. Valid: {', '.join(TRACKING_STATUSES)}")
+    if conn is None:
+        conn = get_connection()
+    job = find_job(ref, conn)
+    if job is None:
+        raise LookupError(f"No job found for {ref!r} (use the job number or its exact URL)")
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE jobs SET tracking_status = ?, tracking_updated_at = ? WHERE rowid = ?",
+        (status, now if status else None, job["id"]),
+    )
+    if status == "applied":
+        conn.execute("UPDATE jobs SET applied_at = COALESCE(applied_at, ?) WHERE rowid = ?", (now, job["id"]))
+    conn.commit()
+    return job
 
 
 def cover_letter_pending_where(min_score: int, max_attempts: int, tailoring: bool,
