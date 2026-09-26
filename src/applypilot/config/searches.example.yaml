@@ -97,6 +97,10 @@ boards:
 # stage is skipped and cover letters use your resume as-is.
 tailor_resumes: true
 
+# Jobs scored per LLM request (1-10, default 1). Higher uses fewer requests,
+# which helps on free tiers with daily request limits.
+score_jobs_per_request: 1
+
 # Discovery sources to run (all default to true when omitted)
 discovery_sources:
   jobspy: true        # Indeed, LinkedIn, etc. via JobSpy

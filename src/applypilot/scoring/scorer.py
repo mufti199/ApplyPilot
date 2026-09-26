@@ -11,7 +11,12 @@ import re
 import time
 from datetime import UTC, datetime
 
-from applypilot.config import get_preferred_locations, get_resume_tracks, load_search_config
+from applypilot.config import (
+    get_preferred_locations,
+    get_resume_tracks,
+    get_score_group_size,
+    load_search_config,
+)
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import DailyQuotaExceeded, get_client
 
@@ -50,6 +55,18 @@ You are given several resumes for the same candidate, each labelled with a TRACK
 Pick the ONE resume that best fits this job and score the job against that resume only.
 Put this extra line FIRST in your response, before SCORE:
 TRACK: [exactly one of: {tracks}]"""
+
+
+BATCH_SUFFIX = """
+
+MULTIPLE JOBS:
+You are given {count} job postings, labelled JOB 1 to JOB {count}. Evaluate each one
+independently against the resume(s); do not compare the jobs with each other.
+For EACH job, output one block that starts with a line "JOB: <number>" followed by the
+lines in the format above. Output the blocks in order, one per job, nothing else."""
+
+# Output budget per job in a grouped request (visible answer + model reasoning).
+_TOKENS_PER_JOB = 700
 
 
 def _build_score_prompt(track_names: list[str]) -> str:
@@ -110,12 +127,7 @@ def score_job(resumes: dict[str, str], job: dict) -> dict:
         score is 0 on an LLM error or an unusable TRACK answer.
     """
     track_names = list(resumes)
-    job_text = (
-        f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
-        f"LOCATION: {job.get('location', 'N/A')}\n\n"
-        f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
-    )
+    job_text = _format_job(job)
 
     messages = [
         {"role": "system", "content": _build_score_prompt(track_names)},
@@ -131,15 +143,90 @@ def score_job(resumes: dict[str, str], job: dict) -> dict:
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}", "track": None}
 
-    result = _parse_score_response(response)
+    return _check_track(_parse_score_response(response), resumes, job)
+
+
+def _format_job(job: dict) -> str:
+    return (
+        f"TITLE: {job['title']}\n"
+        f"COMPANY: {job['site']}\n"
+        f"LOCATION: {job.get('location', 'N/A')}\n\n"
+        f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
+    )
+
+
+def _failure(reason: str) -> dict:
+    return {"score": 0, "keywords": "", "reasoning": reason, "track": None}
+
+
+def _check_track(result: dict, resumes: dict[str, str], job: dict) -> dict:
+    """Fill in the only track, or reject a missing/unknown TRACK answer."""
+    track_names = list(resumes)
     if len(track_names) == 1:
         result["track"] = track_names[0]
     elif result["track"] not in resumes:
         log.error("Invalid TRACK %r for job '%s' (expected one of %s)",
                   result["track"], job.get("title", "?"), track_names)
-        return {"score": 0, "keywords": "", "reasoning": f"Invalid TRACK in LLM response: {result['track']!r}",
-                "track": None}
+        return _failure(f"Invalid TRACK in LLM response: {result['track']!r}")
     return result
+
+
+def score_jobs(resumes: dict[str, str], jobs: list[dict]) -> list[dict]:
+    """Score a group of jobs in one LLM request; one result per job, in order.
+
+    A group of one uses score_job. Jobs missing or unreadable in the reply get
+    a failure result (score 0) so they are retried later; an LLM error fails
+    the whole group. DailyQuotaExceeded is re-raised for run_scoring.
+    """
+    if len(jobs) == 1:
+        return [score_job(resumes, jobs[0])]
+
+    system = _build_score_prompt(list(resumes)) + BATCH_SUFFIX.format(count=len(jobs))
+    postings = "\n\n".join(f"JOB {n}:\n{_format_job(job)}" for n, job in enumerate(jobs, start=1))
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{_format_resumes(resumes)}\n\n---\n\nJOB POSTINGS:\n{postings}"},
+    ]
+
+    try:
+        response = get_client().chat(messages, max_tokens=_TOKENS_PER_JOB * len(jobs), temperature=0.2)
+    except DailyQuotaExceeded:
+        raise
+    except Exception as e:
+        log.error("LLM error scoring a group of %d jobs: %s", len(jobs), e)
+        return [_failure(f"LLM error: {e}") for _ in jobs]
+
+    blocks = _split_job_blocks(response)
+    results = []
+    for n, job in enumerate(jobs, start=1):
+        block = blocks.get(n)
+        if block is None:
+            results.append(_failure(f"JOB {n} missing from grouped reply"))
+            continue
+        parsed = _parse_score_response(block)
+        if parsed["score"] == 0:
+            results.append(_failure(f"JOB {n} had no usable SCORE in grouped reply"))
+            continue
+        results.append(_check_track(parsed, resumes, job))
+    return results
+
+
+def _split_job_blocks(response: str) -> dict[int, str]:
+    """Split a grouped reply into {job number: block text}. Duplicate numbers keep the first."""
+    blocks: dict[int, str] = {}
+    current = None
+    lines: list[str] = []
+    for line in response.splitlines():
+        match = re.match(r"^\s*\**\s*JOB\s*:?\s*(\d+)\s*\**\s*:?\s*$", line, flags=re.IGNORECASE)
+        if match:
+            if current is not None and current not in blocks:
+                blocks[current] = "\n".join(lines)
+            current, lines = int(match.group(1)), []
+        elif current is not None:
+            lines.append(line)
+    if current is not None and current not in blocks:
+        blocks[current] = "\n".join(lines)
+    return blocks
 
 
 def _save_score(conn, url: str, result: dict) -> None:
@@ -190,42 +277,47 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         columns = jobs[0].keys()
         jobs = [dict(zip(columns, row)) for row in jobs]
 
-    log.info("Scoring %d jobs sequentially...", len(jobs))
+    group_size = get_score_group_size(search_cfg)
+    log.info("Scoring %d jobs, %d per request...", len(jobs), group_size)
     t0 = time.time()
     scored = 0
     errors = 0
-    consecutive_failures = 0
+    consecutive_failures = 0  # failed requests in a row (every job in the group failed)
     aborted = False
 
-    for i, job in enumerate(jobs, start=1):
+    for start in range(0, len(jobs), group_size):
+        group = jobs[start:start + group_size]
         try:
-            result = score_job(resumes, job)
+            results = score_jobs(resumes, group)
         except DailyQuotaExceeded as e:
             aborted = True
             log.error("Scoring stopped: %s (%d scored this run, %d left unscored)",
-                      e, scored, len(jobs) - i + 1)
+                      e, scored, len(jobs) - start)
             break
-        title = job.get("title", "?")[:60]
 
-        if result["score"] == 0:
-            errors += 1
-            consecutive_failures += 1
-            log.warning("[%d/%d] scoring failed, left unscored for retry: %s (%s)",
-                        i, len(jobs), title, result["reasoning"])
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                aborted = True
-                log.error(
-                    "Scoring aborted after %d consecutive failures (%d scored this run). "
-                    "Check your LLM provider, API key and billing/quota.",
-                    consecutive_failures, scored,
-                )
-                break
-            continue
+        group_ok = False
+        for offset, (job, result) in enumerate(zip(group, results), start=1):
+            i = start + offset
+            title = job.get("title", "?")[:60]
+            if result["score"] == 0:
+                errors += 1
+                log.warning("[%d/%d] scoring failed, left unscored for retry: %s (%s)",
+                            i, len(jobs), title, result["reasoning"])
+                continue
+            _save_score(conn, job["url"], result)
+            scored += 1
+            group_ok = True
+            log.info("[%d/%d] score=%d track=%s  %s", i, len(jobs), result["score"], result["track"], title)
 
-        _save_score(conn, job["url"], result)
-        scored += 1
-        consecutive_failures = 0
-        log.info("[%d/%d] score=%d track=%s  %s", i, len(jobs), result["score"], result["track"], title)
+        consecutive_failures = 0 if group_ok else consecutive_failures + 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            aborted = True
+            log.error(
+                "Scoring aborted after %d consecutive failed requests (%d scored this run). "
+                "Check your LLM provider, API key and billing/quota.",
+                consecutive_failures, scored,
+            )
+            break
 
     elapsed = time.time() - t0
     log.info("Done: %d scored, %d errors in %.1fs", scored, errors, elapsed)

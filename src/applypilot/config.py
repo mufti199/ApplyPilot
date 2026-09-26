@@ -166,6 +166,24 @@ def get_preferred_locations(search_cfg: dict | None) -> list[str]:
     return patterns
 
 
+MAX_SCORE_GROUP_SIZE = 10
+
+
+def get_score_group_size(search_cfg: dict | None) -> int:
+    """Jobs scored per LLM request (`score_jobs_per_request`, default 1, max 10).
+
+    Raises:
+        TypeError: if the setting is not an integer.
+        ValueError: if it is outside 1..MAX_SCORE_GROUP_SIZE.
+    """
+    value = (search_cfg or {}).get("score_jobs_per_request", 1)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"score_jobs_per_request must be a whole number, got {value!r}")
+    if not 1 <= value <= MAX_SCORE_GROUP_SIZE:
+        raise ValueError(f"score_jobs_per_request must be between 1 and {MAX_SCORE_GROUP_SIZE}, got {value}")
+    return value
+
+
 def get_tailor_resumes(search_cfg: dict | None) -> bool:
     """Return whether the pipeline tailors a resume per job (`tailor_resumes`, default true).
 
