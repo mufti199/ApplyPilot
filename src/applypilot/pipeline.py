@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from applypilot.config import load_env, ensure_dirs
+from applypilot.config import load_env, ensure_dirs, get_discovery_sources, load_search_config
 from applypilot.database import init_db, get_connection, get_stats
 
 log = logging.getLogger(__name__)
@@ -63,40 +63,63 @@ def _run_discover(workers: int = 1) -> dict:
     """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
     stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
 
-    # JobSpy
-    console.print("  [cyan]JobSpy full crawl...[/cyan]")
     try:
-        from applypilot.discovery.jobspy import run_discovery
-        run_discovery()
-        stats["jobspy"] = "ok"
-    except Exception as e:
-        log.error("JobSpy crawl failed: %s", e)
-        console.print(f"  [red]JobSpy error:[/red] {e}")
-        stats["jobspy"] = f"error: {e}"
+        enabled = get_discovery_sources(load_search_config())
+    except (ValueError, TypeError) as e:
+        log.error("Invalid discovery_sources in searches.yaml: %s", e)
+        console.print(f"  [red]Config error:[/red] {e}")
+        return {name: f"error: {e}" for name in stats}
+
+    # JobSpy
+    if not enabled["jobspy"]:
+        _skip_source(stats, "jobspy", "JobSpy")
+    else:
+        console.print("  [cyan]JobSpy full crawl...[/cyan]")
+        try:
+            from applypilot.discovery.jobspy import run_discovery
+            run_discovery()
+            stats["jobspy"] = "ok"
+        except Exception as e:
+            log.error("JobSpy crawl failed: %s", e)
+            console.print(f"  [red]JobSpy error:[/red] {e}")
+            stats["jobspy"] = f"error: {e}"
 
     # Workday corporate scraper
-    console.print("  [cyan]Workday corporate scraper...[/cyan]")
-    try:
-        from applypilot.discovery.workday import run_workday_discovery
-        run_workday_discovery(workers=workers)
-        stats["workday"] = "ok"
-    except Exception as e:
-        log.error("Workday scraper failed: %s", e)
-        console.print(f"  [red]Workday error:[/red] {e}")
-        stats["workday"] = f"error: {e}"
+    if not enabled["workday"]:
+        _skip_source(stats, "workday", "Workday corporate scraper")
+    else:
+        console.print("  [cyan]Workday corporate scraper...[/cyan]")
+        try:
+            from applypilot.discovery.workday import run_workday_discovery
+            run_workday_discovery(workers=workers)
+            stats["workday"] = "ok"
+        except Exception as e:
+            log.error("Workday scraper failed: %s", e)
+            console.print(f"  [red]Workday error:[/red] {e}")
+            stats["workday"] = f"error: {e}"
 
     # Smart extract
-    console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
-    try:
-        from applypilot.discovery.smartextract import run_smart_extract
-        run_smart_extract(workers=workers)
-        stats["smartextract"] = "ok"
-    except Exception as e:
-        log.error("Smart extract failed: %s", e)
-        console.print(f"  [red]Smart extract error:[/red] {e}")
-        stats["smartextract"] = f"error: {e}"
+    if not enabled["smartextract"]:
+        _skip_source(stats, "smartextract", "Smart extract")
+    else:
+        console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
+        try:
+            from applypilot.discovery.smartextract import run_smart_extract
+            run_smart_extract(workers=workers)
+            stats["smartextract"] = "ok"
+        except Exception as e:
+            log.error("Smart extract failed: %s", e)
+            console.print(f"  [red]Smart extract error:[/red] {e}")
+            stats["smartextract"] = f"error: {e}"
 
     return stats
+
+
+def _skip_source(stats: dict, key: str, label: str) -> None:
+    """Record a discovery source as disabled in searches.yaml."""
+    log.info("Discovery source skipped (disabled in config): %s", key)
+    console.print(f"  [dim]{label} skipped (disabled in searches.yaml)[/dim]")
+    stats[key] = "skipped"
 
 
 def _run_enrich(workers: int = 1) -> dict:

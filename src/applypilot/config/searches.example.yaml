@@ -93,6 +93,12 @@ boards:
   - zip_recruiter
   - google
 
+# Discovery sources to run (all default to true when omitted)
+discovery_sources:
+  jobspy: true        # Indeed, LinkedIn, etc. via JobSpy
+  workday: true       # employers in config/employers.yaml
+  smartextract: true  # career sites in config/sites.yaml
+
 # Search defaults
 defaults:
   results_per_site: 100  # Max results per board per query

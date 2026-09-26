@@ -113,6 +113,37 @@ def load_search_config() -> dict:
     return yaml.safe_load(SEARCH_CONFIG_PATH.read_text(encoding="utf-8"))
 
 
+DISCOVERY_SOURCES = ("jobspy", "workday", "smartextract")
+
+
+def get_discovery_sources(search_cfg: dict | None) -> dict[str, bool]:
+    """Return which discovery sources are enabled.
+
+    Reads the optional `discovery_sources` mapping from the search config.
+    Sources not listed default to enabled.
+
+    Raises:
+        ValueError: if a source name is unknown.
+        TypeError: if the setting is not a mapping or a value is not a boolean.
+    """
+    raw = (search_cfg or {}).get("discovery_sources")
+    enabled = {name: True for name in DISCOVERY_SOURCES}
+    if raw is None:
+        return enabled
+    if not isinstance(raw, dict):
+        raise TypeError("discovery_sources must be a mapping of source name to true/false")
+
+    for name, value in raw.items():
+        if name not in enabled:
+            raise ValueError(
+                f"Unknown discovery source '{name}'. Valid: {', '.join(DISCOVERY_SOURCES)}"
+            )
+        if not isinstance(value, bool):
+            raise TypeError(f"discovery_sources.{name} must be true or false, got {value!r}")
+        enabled[name] = value
+    return enabled
+
+
 def load_sites_config() -> dict:
     """Load sites.yaml configuration (sites list, manual_ats, blocked, etc.)."""
     import yaml
