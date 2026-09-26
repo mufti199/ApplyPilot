@@ -2,15 +2,18 @@
 Unified LLM client for ApplyPilot.
 
 Auto-detects provider from environment:
-  GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
+  GEMINI_API_KEY  -> Google Gemini (default: gemini-3.5-flash-lite)
   OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
   LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
 
 LLM_MODEL env var overrides the model name for any provider.
+LLM_RPM env var caps requests per minute (pacing for free tiers).
 """
 
 import logging
 import os
+import re
+import threading
 import time
 
 import httpx
@@ -35,7 +38,7 @@ def _detect_provider() -> tuple[str, str, str]:
     if gemini_key and not local_url:
         return (
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            model_override or "gemini-2.0-flash",
+            model_override or "gemini-3.5-flash-lite",
             gemini_key,
         )
 
@@ -84,14 +87,29 @@ class LLMClient:
     for the lifetime of the process.
     """
 
-    def __init__(self, base_url: str, model: str, api_key: str) -> None:
+    def __init__(self, base_url: str, model: str, api_key: str, rpm: float | None = None) -> None:
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
         self._client = httpx.Client(timeout=_TIMEOUT)
+        # Pacing: minimum seconds between request starts, shared across threads
+        self._min_interval = 60.0 / rpm if rpm else 0.0
+        self._pace_lock = threading.Lock()
+        self._next_slot = 0.0
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)
+
+    def _wait_for_slot(self) -> None:
+        """Block until this request may start, keeping under LLM_RPM."""
+        if not self._min_interval:
+            return
+        with self._pace_lock:
+            now = time.monotonic()
+            start = max(now, self._next_slot)
+            self._next_slot = start + self._min_interval
+        if start > now:
+            time.sleep(start - now)
 
     # -- Native Gemini API --------------------------------------------------
 
@@ -134,6 +152,7 @@ class LLMClient:
             payload["systemInstruction"] = {"parts": system_parts}
 
         url = f"{_GEMINI_NATIVE_BASE}/models/{self.model}:generateContent"
+        self._wait_for_slot()
         resp = self._client.post(
             url,
             json=payload,
@@ -164,6 +183,7 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
 
+        self._wait_for_slot()
         resp = self._client.post(
             f"{self.base_url}/chat/completions",
             json=payload,
@@ -228,29 +248,26 @@ class LLMClient:
 
             except httpx.HTTPStatusError as exc:
                 resp = exc.response
+                provider = self._provider_name()
+                code, detail = _error_detail(resp)
+                if code in _NON_RETRYABLE_CODES:
+                    raise RuntimeError(
+                        f"{provider} API error HTTP {resp.status_code} ({code}): {detail}"
+                    ) from exc
+                if resp.status_code == 429 and _is_daily_quota(resp):
+                    raise DailyQuotaExceeded(
+                        f"{provider} daily request quota reached for model '{self.model}'. "
+                        "Free-tier daily quotas reset at midnight Pacific time; run again after that."
+                    ) from exc
                 if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
-                    # Respect Retry-After header if provided (Gemini sends this).
-                    retry_after = (
-                        resp.headers.get("Retry-After")
-                        or resp.headers.get("X-RateLimit-Reset-Requests")
-                    )
-                    if retry_after:
-                        try:
-                            wait = float(retry_after)
-                        except (ValueError, TypeError):
-                            wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
-                    else:
-                        wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
-
+                    wait = _retry_wait(resp, attempt)
                     log.warning(
-                        "LLM rate limited (HTTP %s). Waiting %ds before retry %d/%d. "
-                        "Tip: Gemini free tier = 15 RPM. Consider a paid account "
-                        "or switching to a local model.",
-                        resp.status_code, wait, attempt + 1, _MAX_RETRIES,
+                        "%s rate limited (HTTP %s): %s. Waiting %ds before retry %d/%d.",
+                        provider, resp.status_code, detail, wait, attempt + 1, _MAX_RETRIES,
                     )
                     time.sleep(wait)
                     continue
-                raise
+                raise RuntimeError(f"{provider} API error HTTP {resp.status_code}: {detail}") from exc
 
             except httpx.TimeoutException:
                 if attempt < _MAX_RETRIES - 1:
@@ -265,12 +282,72 @@ class LLMClient:
 
         raise RuntimeError("LLM request failed after all retries")
 
+    def _provider_name(self) -> str:
+        if self._is_gemini or self._use_native_gemini:
+            return "Gemini"
+        if self.base_url.startswith("https://api.openai.com"):
+            return "OpenAI"
+        return f"LLM ({self.base_url})"
+
     def ask(self, prompt: str, **kwargs) -> str:
         """Convenience: single user prompt -> assistant response."""
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
 
     def close(self) -> None:
         self._client.close()
+
+
+# Error codes where retrying cannot help (account/billing problems).
+_NON_RETRYABLE_CODES = {"insufficient_quota", "billing_hard_limit_reached"}
+
+
+class DailyQuotaExceeded(RuntimeError):
+    """The provider's per-day request quota is used up; retrying today won't help."""
+
+
+def _is_daily_quota(resp: httpx.Response) -> bool:
+    """True if a 429 is for a per-day quota (Gemini names it e.g. '...PerDay...')."""
+    return "perday" in resp.text.lower()
+
+
+def _retry_wait(resp: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying a 429/503.
+
+    Uses the Retry-After header, else Gemini's RetryInfo "retryDelay": "30s"
+    in the body, else exponential backoff capped at 60s.
+    """
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', resp.text)
+    if match:
+        return float(match.group(1)) + 1  # small margin past the reset
+    return min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
+
+
+def _error_detail(resp: httpx.Response) -> tuple[str | None, str]:
+    """Extract (error code, message) from an API error response.
+
+    Handles the OpenAI-style {"error": {"code", "message"}} shape, and Gemini's
+    variant (sometimes wrapped in a list, numeric code plus a string status);
+    falls back to the raw body text.
+    """
+    try:
+        body = resp.json()
+        if isinstance(body, list) and body:
+            body = body[0]
+        err = body.get("error", {})
+        if isinstance(err, dict) and err.get("message"):
+            code = err.get("code")
+            if not isinstance(code, str):
+                code = err.get("status")
+            return code, str(err["message"])[:300]
+    except (ValueError, AttributeError):
+        pass
+    return None, resp.text[:300] or resp.reason_phrase
 
 
 class _GeminiCompatForbidden(Exception):
@@ -292,6 +369,21 @@ def get_client() -> LLMClient:
     global _instance
     if _instance is None:
         base_url, model, api_key = _detect_provider()
-        log.info("LLM provider: %s  model: %s", base_url, model)
-        _instance = LLMClient(base_url, model, api_key)
+        rpm = _read_rpm()
+        log.info("LLM provider: %s  model: %s  rpm_limit: %s", base_url, model, rpm or "none")
+        _instance = LLMClient(base_url, model, api_key, rpm=rpm)
     return _instance
+
+
+def _read_rpm() -> float | None:
+    """Parse LLM_RPM from the environment. Unset/empty -> no pacing."""
+    raw = os.environ.get("LLM_RPM", "").strip()
+    if not raw:
+        return None
+    try:
+        rpm = float(raw)
+    except ValueError:
+        raise ValueError(f"LLM_RPM must be a number, got {raw!r}") from None
+    if rpm <= 0:
+        raise ValueError(f"LLM_RPM must be greater than 0, got {raw!r}")
+    return rpm
