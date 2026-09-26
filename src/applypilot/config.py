@@ -166,6 +166,18 @@ def get_preferred_locations(search_cfg: dict | None) -> list[str]:
     return patterns
 
 
+def get_auto_apply(search_cfg: dict | None) -> bool:
+    """Whether `applypilot apply` may submit applications (`auto_apply`, default true).
+
+    Raises:
+        TypeError: if the setting is not true/false.
+    """
+    value = (search_cfg or {}).get("auto_apply", True)
+    if not isinstance(value, bool):
+        raise TypeError(f"auto_apply must be true or false, got {value!r}")
+    return value
+
+
 MAX_SCORE_GROUP_SIZE = 10
 
 

@@ -93,6 +93,10 @@ boards:
   - zip_recruiter
   - google
 
+# Let 'applypilot apply' submit applications for you (default true).
+# Set false if you apply yourself and track it with 'applypilot mark'.
+auto_apply: true
+
 # Rewrite your resume for each job (default true). With false, the tailor
 # stage is skipped and cover letters use your resume as-is.
 tailor_resumes: true

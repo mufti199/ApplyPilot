@@ -186,6 +186,22 @@ def apply(
 
     # --- Full apply mode ---
 
+    # Check 0: auto-apply switched off in searches.yaml (--gen only writes a prompt file)
+    if not gen:
+        from applypilot.config import get_auto_apply, load_search_config
+        try:
+            allowed = get_auto_apply(load_search_config())
+        except TypeError as e:
+            console.print(f"[red]Config error:[/red] {e}")
+            raise typer.Exit(code=1) from e
+        if not allowed:
+            log.info("Auto-apply refused: auto_apply is false in searches.yaml")
+            console.print(
+                "[yellow]Auto-apply is turned off[/yellow] (auto_apply: false in searches.yaml).\n"
+                "Apply yourself, then record it with [bold]applypilot mark <job> applied[/bold]."
+            )
+            raise typer.Exit(code=1)
+
     # Check 1: Tier 3 required (Claude Code CLI + Chrome)
     check_tier(3, "auto-apply")
 
