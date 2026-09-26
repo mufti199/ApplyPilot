@@ -124,7 +124,7 @@ def score_job(resumes: dict[str, str], job: dict) -> dict:
 
     try:
         client = get_client()
-        response = client.chat(messages, max_tokens=512, temperature=0.2)
+        response = client.chat(messages, max_tokens=1024, temperature=0.2)
     except DailyQuotaExceeded:
         raise  # run_scoring stops the whole run
     except Exception as e:

@@ -8,6 +8,7 @@ Auto-detects provider from environment:
 
 LLM_MODEL env var overrides the model name for any provider.
 LLM_RPM env var caps requests per minute (pacing for free tiers).
+LLM_REASONING_EFFORT (low|medium|high) is sent as reasoning_effort when set.
 """
 
 import logging
@@ -87,10 +88,12 @@ class LLMClient:
     for the lifetime of the process.
     """
 
-    def __init__(self, base_url: str, model: str, api_key: str, rpm: float | None = None) -> None:
+    def __init__(self, base_url: str, model: str, api_key: str, rpm: float | None = None,
+                 reasoning_effort: str | None = None) -> None:
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
+        self.reasoning_effort = reasoning_effort
         self._client = httpx.Client(timeout=_TIMEOUT)
         # Pacing: minimum seconds between request starts, shared across threads
         self._min_interval = 60.0 / rpm if rpm else 0.0
@@ -161,7 +164,12 @@ class LLMClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        candidate = data["candidates"][0]
+        if candidate.get("finishReason") == "MAX_TOKENS":
+            raise TruncatedResponse(
+                f"Gemini reply for model '{self.model}' hit the {max_tokens}-token output limit"
+            )
+        return candidate["content"]["parts"][0]["text"]
 
     # -- OpenAI-compat API --------------------------------------------------
 
@@ -182,6 +190,8 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
 
         self._wait_for_slot()
         resp = self._client.post(
@@ -195,13 +205,17 @@ class LLMClient:
         if resp.status_code == 403 and self._is_gemini:
             raise _GeminiCompatForbidden(resp)
 
-        return self._handle_compat_response(resp)
+        return self._handle_compat_response(resp, max_tokens)
 
-    @staticmethod
-    def _handle_compat_response(resp: httpx.Response) -> str:
+    def _handle_compat_response(self, resp: httpx.Response, max_tokens: int) -> str:
         resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        choice = resp.json()["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise TruncatedResponse(
+                f"{self._provider_name()} reply for model '{self.model}' "
+                f"hit the {max_tokens}-token output limit"
+            )
+        return choice["message"]["content"]
 
     # -- public API ---------------------------------------------------------
 
@@ -305,6 +319,10 @@ class DailyQuotaExceeded(RuntimeError):
     """The provider's per-day request quota is used up; retrying today won't help."""
 
 
+class TruncatedResponse(RuntimeError):
+    """The reply was cut off at the output token limit, so it is incomplete."""
+
+
 def _is_daily_quota(resp: httpx.Response) -> bool:
     """True if a 429 is for a per-day quota (Gemini names it e.g. '...PerDay...')."""
     return "perday" in resp.text.lower()
@@ -370,9 +388,26 @@ def get_client() -> LLMClient:
     if _instance is None:
         base_url, model, api_key = _detect_provider()
         rpm = _read_rpm()
-        log.info("LLM provider: %s  model: %s  rpm_limit: %s", base_url, model, rpm or "none")
-        _instance = LLMClient(base_url, model, api_key, rpm=rpm)
+        effort = _read_reasoning_effort()
+        log.info("LLM provider: %s  model: %s  rpm_limit: %s  reasoning_effort: %s",
+                 base_url, model, rpm or "none", effort or "default")
+        _instance = LLMClient(base_url, model, api_key, rpm=rpm, reasoning_effort=effort)
     return _instance
+
+
+_REASONING_EFFORTS = ("low", "medium", "high")
+
+
+def _read_reasoning_effort() -> str | None:
+    """Parse LLM_REASONING_EFFORT from the environment. Unset/empty -> provider default."""
+    raw = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
+    if not raw:
+        return None
+    if raw not in _REASONING_EFFORTS:
+        raise ValueError(
+            f"LLM_REASONING_EFFORT must be one of {', '.join(_REASONING_EFFORTS)}, got {raw!r}"
+        )
+    return raw
 
 
 def _read_rpm() -> float | None:
