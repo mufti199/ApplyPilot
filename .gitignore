@@ -2,12 +2,18 @@
 profile.json
 resume.txt
 resume.pdf
+/searches.yaml
 *.env
 .env.*
 !.env.example
 
 # Runtime artifacts
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+dashboard.html
 tailored_resumes/
 cover_letters/
 chrome-workers/
@@ -18,6 +24,11 @@ logs/
 # MCP configs (per-machine)
 .mcp*.json
 
+# Virtual environments
+.venv*/
+venv/
+env/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -26,6 +37,16 @@ __pycache__/
 dist/
 build/
 *.egg
+.eggs/
+pip-wheel-metadata/
+
+# Test / lint / type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # IDE
 .vscode/
@@ -36,6 +57,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Claude Code
 .claude/
