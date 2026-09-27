@@ -55,7 +55,7 @@ def no_sleep(monkeypatch):
 # -- FallbackClient behaviour ----------------------------------------------------
 
 def test_main_model_used_when_it_works():
-    zai, zai_calls = fake(ZAI, "glm-4.7-flash", [ok("hi")])
+    zai, _ = fake(ZAI, "glm-4.7-flash", [ok("hi")])
     gem, gem_calls = fake(GEMINI, "gemini-3.8-flash", [ok("unused")])
     client = FallbackClient(zai, gem)
 
@@ -98,7 +98,7 @@ def test_main_quota_sticks_to_fallback():
 
 
 def test_fallback_quota_disables_fallback_and_main_error_surfaces():
-    zai, zai_calls = fake(ZAI, "glm-4.7-flash", [overloaded()] * 5 + [ok("main again")])
+    zai, _ = fake(ZAI, "glm-4.7-flash", [overloaded()] * 5 + [ok("main again")])
     gem, gem_calls = fake(GEMINI, "gemini-3.8-flash", [gemini_daily_quota()])
     client = FallbackClient(zai, gem)
 
