@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
-from applypilot.database import get_connection, preferred_location_order
+from applypilot.database import ACTIVE_JOB_SQL, get_connection, preferred_location_order
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
@@ -138,6 +138,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND (apply_status IS NULL OR apply_status = 'failed')
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND tracking_status IS NULL
+                  AND {ACTIVE_JOB_SQL}
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}

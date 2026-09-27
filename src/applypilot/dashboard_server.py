@@ -50,14 +50,18 @@ def dashboard_data(conn=None) -> dict:
         "strong": count("fit_score >= 7"),
         "cover_letters": count("cover_letter_path IS NOT NULL AND cover_letter_path != ''"),
         "tracked": count("tracking_status IS NOT NULL"),
+        "duplicates": count("duplicate_of IS NOT NULL"),
     }
     rows = conn.execute("""
         SELECT rowid AS id, url, application_url, title, company, site, location, salary,
                fit_score, score_reasoning, resume_track, tracking_status, tracking_updated_at,
                cover_letter_path, discovered_at, scored_at
-        FROM jobs WHERE fit_score IS NOT NULL
+        FROM jobs WHERE fit_score IS NOT NULL AND duplicate_of IS NULL
         ORDER BY fit_score DESC, scored_at DESC
     """).fetchall()
+    copies: dict[int, list] = {}
+    for d in conn.execute("SELECT duplicate_of, site, url FROM jobs WHERE duplicate_of IS NOT NULL"):
+        copies.setdefault(d["duplicate_of"], []).append({"site": d["site"], "url": d["url"]})
 
     jobs = []
     for r in rows:
@@ -79,6 +83,7 @@ def dashboard_data(conn=None) -> dict:
             "status_at": r["tracking_updated_at"],
             "has_cover_letter": bool(_cover_pdf_path(r["cover_letter_path"])),
             "scored_at": r["scored_at"],
+            "also_on": copies.get(r["id"], []),
         })
     return {"stats": stats, "jobs": jobs, "statuses": list(TRACKING_STATUSES)}
 
@@ -272,6 +277,7 @@ PAGE = """<!DOCTYPE html>
   .tag.loc { background: #1e3a5f; color: #93c5fd; } .tag.sal { background: #3f3f46; color: #fde68a; }
   .tag.status { background: #7c2d12; color: #fed7aa; }
   .tag.co { background: #475569; color: #f1f5f9; font-weight: 600; }
+  .also { font-size: .75rem; color: #94a3b8; margin-top: .5rem; } .also a { color: #93c5fd; }
   .kw { font-size: .75rem; color: #10b981; margin-bottom: .3rem; }
   .why { font-size: .75rem; color: #94a3b8; font-style: italic; margin-bottom: .6rem; line-height: 1.4; }
   .actions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
@@ -333,7 +339,7 @@ async function load() {
 function renderStats(s) {
   const items = [["Total jobs", s.total], ["With description", s.with_description], ["Scored", s.scored],
     ["Waiting to score", s.unscored], ["Strong fit (7+)", s.strong], ["Cover letters", s.cover_letters],
-    ["Tracked by you", s.tracked]];
+    ["Tracked by you", s.tracked], ["Duplicates grouped", s.duplicates]];
   $("stats").innerHTML = items.map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
 }
 
@@ -365,6 +371,7 @@ function card(j, statuses) {
     ${j.reasoning ? `<div class="why">${esc(j.reasoning)}</div>` : ""}
     <div class="actions"><a class="link" target="_blank" href="${esc(j.apply_url)}">Open posting</a>${resume}${cover}
       <select class="status" data-id="${j.id}">${opts}</select></div>
+    ${j.also_on.length ? `<div class="also">Also posted on: ${j.also_on.map(a => `<a target="_blank" href="${esc(a.url)}">${esc(a.site)}</a>`).join(", ")}</div>` : ""}
     <details data-id="${j.id}" ${state.open.has(j.id) ? "open" : ""}><summary>Full description</summary><div class="desc">…</div></details>
   </div>`;
 }

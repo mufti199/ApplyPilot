@@ -372,9 +372,9 @@ def jobs(
     """List scored jobs with their numbers, for use with 'applypilot mark'."""
     _bootstrap()
 
-    from applypilot.database import TRACKING_STATUSES, get_connection
+    from applypilot.database import ACTIVE_JOB_SQL, TRACKING_STATUSES, get_connection
 
-    where, params = ["fit_score >= ?"], [min_score]
+    where, params = ["fit_score >= ?", ACTIVE_JOB_SQL], [min_score]
     if status:
         status = status.strip().lower()
         if status == "none":

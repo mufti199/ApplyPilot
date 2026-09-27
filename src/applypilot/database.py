@@ -5,6 +5,8 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
+import hashlib
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -185,7 +187,13 @@ _ALL_COLUMNS: dict[str, str] = {
     # Manual tracking (set by the user, not the auto-apply agent)
     "tracking_status": "TEXT",
     "tracking_updated_at": "TEXT",
+    # Same job posted more than once (other board or repost): rowid of the main copy
+    "dedupe_key": "TEXT",
+    "duplicate_of": "INTEGER",
 }
+
+# Jobs the pipeline should work on (duplicates are handled through their main copy).
+ACTIVE_JOB_SQL = "duplicate_of IS NULL"
 
 # Statuses a user can record for a job they handle themselves.
 TRACKING_STATUSES = ("applied", "skipped", "interviewing", "rejected", "offer", "cold-call")
@@ -370,6 +378,59 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     return new, existing
 
 
+_DEDUPE_MIN_DESCRIPTION = 200  # shorter descriptions are too generic to match on
+_DEDUPE_PREFIX_CHARS = 400
+
+
+def dedupe_key(title: str | None, description: str | None) -> str | None:
+    """Fingerprint for spotting the same job posted twice: title + description start.
+
+    Returns None when the description is too short to match safely.
+    """
+    norm = lambda s: re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()  # noqa: E731
+    desc = norm(description)
+    if len(desc) < _DEDUPE_MIN_DESCRIPTION or not norm(title):
+        return None
+    digest = hashlib.sha1(desc[:_DEDUPE_PREFIX_CHARS].encode("utf-8")).hexdigest()[:16]
+    return f"{norm(title)}|{digest}"
+
+
+def mark_duplicates(conn: sqlite3.Connection | None = None) -> int:
+    """Group jobs that are the same posting (other board or repost).
+
+    The main copy is one already scored if any, else the earliest stored; the
+    others get duplicate_of = its rowid. Idempotent. Returns how many jobs are
+    currently marked as duplicates.
+    """
+    if conn is None:
+        conn = get_connection()
+    rows = conn.execute(
+        "SELECT rowid, title, full_description, fit_score, dedupe_key, duplicate_of FROM jobs"
+    ).fetchall()
+
+    groups: dict[str, list] = {}
+    for r in rows:
+        key = r["dedupe_key"] or dedupe_key(r["title"], r["full_description"])
+        if key is None:
+            continue
+        if r["dedupe_key"] is None:
+            conn.execute("UPDATE jobs SET dedupe_key = ? WHERE rowid = ?", (key, r["rowid"]))
+        groups.setdefault(key, []).append(r)
+
+    marked = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        main = min(members, key=lambda r: (r["fit_score"] is None, r["rowid"]))
+        for m in members:
+            target = None if m is main else main["rowid"]
+            if m["duplicate_of"] != target:
+                conn.execute("UPDATE jobs SET duplicate_of = ? WHERE rowid = ?", (target, m["rowid"]))
+            marked += target is not None
+    conn.commit()
+    return marked
+
+
 def find_job(ref: str, conn: sqlite3.Connection | None = None) -> dict | None:
     """Look up a job by its number (SQLite rowid) or by its URL / application URL."""
     if conn is None:
@@ -427,7 +488,7 @@ def cover_letter_pending_where(min_score: int, max_attempts: int, tailoring: boo
     where = (
         "fit_score >= ? AND full_description IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < ?"
+        f"AND COALESCE(cover_attempts, 0) < ? AND {ACTIVE_JOB_SQL}"
     )
     params: list = [min_score, max_attempts]
     if tailoring:
@@ -477,11 +538,12 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         "discovered": "1=1",
         "pending_detail": "detail_scraped_at IS NULL",
         "enriched": "full_description IS NOT NULL",
-        "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
+        "pending_score": f"full_description IS NOT NULL AND fit_score IS NULL AND {ACTIVE_JOB_SQL}",
         "scored": "fit_score IS NOT NULL",
         "pending_tailor": (
             "fit_score >= ? AND full_description IS NOT NULL "
-            "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"
+            "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5 "
+            f"AND {ACTIVE_JOB_SQL}"
         ),
         "tailored": "tailored_resume_path IS NOT NULL",
         "pending_apply": (

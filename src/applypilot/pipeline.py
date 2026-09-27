@@ -29,7 +29,14 @@ from applypilot.config import (
     load_env,
     load_search_config,
 )
-from applypilot.database import cover_letter_pending_where, get_connection, get_stats, init_db
+from applypilot.database import (
+    ACTIVE_JOB_SQL,
+    cover_letter_pending_where,
+    get_connection,
+    get_stats,
+    init_db,
+    mark_duplicates,
+)
 
 log = logging.getLogger(__name__)
 console = Console()
@@ -131,6 +138,8 @@ def _run_discover(workers: int = 1) -> dict:
             console.print(f"  [red]Smart extract error:[/red] {e}")
             stats["smartextract"] = f"error: {e}"
 
+    dupes = mark_duplicates()
+    log.info("Duplicate postings grouped: %d jobs marked as copies of another", dupes)
     return stats
 
 
@@ -271,7 +280,8 @@ class _StageTracker:
 # SQL to count pending work for each stage
 _PENDING_SQL: dict[str, str] = {
     "enrich": "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL",
-    "score":  "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL",
+    "score":  f"SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL "
+              f"AND {ACTIVE_JOB_SQL}",
     "tailor": (
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
         "AND full_description IS NOT NULL "

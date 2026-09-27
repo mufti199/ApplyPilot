@@ -17,7 +17,7 @@ from applypilot.config import (
     get_score_group_size,
     load_search_config,
 )
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection, get_jobs_by_stage, mark_duplicates
 from applypilot.llm import DailyQuotaExceeded, get_client
 
 log = logging.getLogger(__name__)
@@ -264,6 +264,8 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     resumes = {name: t["text"].read_text(encoding="utf-8") for name, t in tracks.items()}
     log.info("Scoring with resume tracks: %s", ", ".join(resumes))
     conn = get_connection()
+    dupes = mark_duplicates(conn)
+    log.info("Duplicate postings: %d jobs are copies and will not be scored", dupes)
 
     if rescore:
         query = "SELECT * FROM jobs WHERE full_description IS NOT NULL"
