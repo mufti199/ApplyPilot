@@ -24,6 +24,7 @@ from rich.table import Table
 from applypilot.config import (
     ensure_dirs,
     get_discovery_sources,
+    get_permanent_full_time_only,
     get_resume_tracks,
     get_tailor_resumes,
     load_env,
@@ -138,6 +139,9 @@ def _run_discover(workers: int = 1) -> dict:
             console.print(f"  [red]Smart extract error:[/red] {e}")
             stats["smartextract"] = f"error: {e}"
 
+    if get_permanent_full_time_only(load_search_config()):
+        from applypilot.scoring.employment import apply_rules
+        apply_rules(get_connection())
     dupes = mark_duplicates()
     log.info("Duplicate postings grouped: %d jobs marked as copies of another", dupes)
     return stats

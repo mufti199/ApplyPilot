@@ -178,6 +178,23 @@ def get_auto_apply(search_cfg: dict | None) -> bool:
     return value
 
 
+def get_permanent_full_time_only(search_cfg: dict | None) -> bool:
+    """Whether to exclude contract, part-time, casual and temporary jobs.
+
+    Reads `employment: {permanent_full_time_only: true}` (default false).
+
+    Raises:
+        TypeError: if the setting has the wrong shape.
+    """
+    employment = (search_cfg or {}).get("employment", {})
+    if not isinstance(employment, dict):
+        raise TypeError("employment must be a mapping, e.g. {permanent_full_time_only: true}")
+    value = employment.get("permanent_full_time_only", False)
+    if not isinstance(value, bool):
+        raise TypeError(f"employment.permanent_full_time_only must be true or false, got {value!r}")
+    return value
+
+
 MAX_SCORE_GROUP_SIZE = 10
 
 

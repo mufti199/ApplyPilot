@@ -51,13 +51,14 @@ def dashboard_data(conn=None) -> dict:
         "cover_letters": count("cover_letter_path IS NOT NULL AND cover_letter_path != ''"),
         "tracked": count("tracking_status IS NOT NULL"),
         "duplicates": count("duplicate_of IS NOT NULL"),
+        "excluded": count("excluded_reason IS NOT NULL AND duplicate_of IS NULL"),
     }
     rows = conn.execute("""
         SELECT rowid AS id, url, application_url, title, company, site, location, salary,
                fit_score, score_reasoning, resume_track, tracking_status, tracking_updated_at,
-               cover_letter_path, discovered_at, scored_at
-        FROM jobs WHERE fit_score IS NOT NULL AND duplicate_of IS NULL
-        ORDER BY fit_score DESC, scored_at DESC
+               cover_letter_path, discovered_at, scored_at, excluded_reason
+        FROM jobs WHERE duplicate_of IS NULL AND (fit_score IS NOT NULL OR excluded_reason IS NOT NULL)
+        ORDER BY fit_score DESC NULLS LAST, scored_at DESC
     """).fetchall()
     copies: dict[int, list] = {}
     for d in conn.execute("SELECT duplicate_of, site, url FROM jobs WHERE duplicate_of IS NOT NULL"):
@@ -75,7 +76,8 @@ def dashboard_data(conn=None) -> dict:
             "company": r["company"] or "",
             "location": r["location"] or "",
             "salary": r["salary"] or "",
-            "score": r["fit_score"],
+            "score": r["fit_score"] or 0,
+            "excluded": r["excluded_reason"],
             "keywords": keywords.strip(),
             "reasoning": reasoning.strip(),
             "track": r["resume_track"],
@@ -277,6 +279,7 @@ PAGE = """<!DOCTYPE html>
   .tag.loc { background: #1e3a5f; color: #93c5fd; } .tag.sal { background: #3f3f46; color: #fde68a; }
   .tag.status { background: #7c2d12; color: #fed7aa; }
   .tag.co { background: #475569; color: #f1f5f9; font-weight: 600; }
+  .excl { font-size: .75rem; color: #fca5a5; margin-bottom: .3rem; }
   .also { font-size: .75rem; color: #94a3b8; margin-top: .5rem; } .also a { color: #93c5fd; }
   .kw { font-size: .75rem; color: #10b981; margin-bottom: .3rem; }
   .why { font-size: .75rem; color: #94a3b8; font-style: italic; margin-bottom: .6rem; line-height: 1.4; }
@@ -310,6 +313,7 @@ PAGE = """<!DOCTYPE html>
   <div class="group"><span class="label">Status</span>
     <select id="statusFilter"><option value="open">Not applied / skipped</option><option value="">Any</option>
       <option value="none">Untracked</option></select></div>
+  <div class="group"><label class="chk"><input type="checkbox" id="showExcluded"> Show excluded</label></div>
   <div class="group"><input type="text" id="search" placeholder="Search title, company, location…"></div>
 </div>
 
@@ -318,7 +322,7 @@ PAGE = """<!DOCTYPE html>
 <div class="toast" id="toast"></div>
 
 <script>
-const state = { min: 5, track: "", status: "open", q: "", data: null, open: new Set() };
+const state = { min: 5, track: "", status: "open", q: "", data: null, open: new Set(), showExcluded: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const color = (s) => s >= 7 ? "#10b981" : s >= 5 ? "#f59e0b" : "#ef4444";
@@ -339,11 +343,12 @@ async function load() {
 function renderStats(s) {
   const items = [["Total jobs", s.total], ["With description", s.with_description], ["Scored", s.scored],
     ["Waiting to score", s.unscored], ["Strong fit (7+)", s.strong], ["Cover letters", s.cover_letters],
-    ["Tracked by you", s.tracked], ["Duplicates grouped", s.duplicates]];
+    ["Tracked by you", s.tracked], ["Duplicates grouped", s.duplicates], ["Excluded (not permanent FT)", s.excluded]];
   $("stats").innerHTML = items.map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
 }
 
 function visible(j) {
+  if (j.excluded) return state.showExcluded;
   if (j.score < state.min) return false;
   if (state.track && j.track !== state.track) return false;
   if (state.status === "open" && (j.status === "applied" || j.status === "skipped")) return false;
@@ -361,12 +366,13 @@ function card(j, statuses) {
   const resume = j.track ? `<a class="link" target="_blank" href="/files/resume/${esc(j.track)}">Resume (${esc(j.track)})</a>` : "";
   const cover = `<a class="link ${j.has_cover_letter ? "" : "off"}" target="_blank" href="/files/cover/${j.id}">${j.has_cover_letter ? "Cover letter" : "No cover letter yet"}</a>`;
   return `<div class="card s${j.score} ${done ? "done" : ""}" data-id="${j.id}">
-    <div class="head"><span class="pill" style="background:${color(j.score)}">${j.score}</span>
+    <div class="head"><span class="pill" style="background:${j.excluded ? "#64748b" : color(j.score)}">${j.score || "–"}</span>
       <a class="title" target="_blank" href="${esc(j.url)}">${esc(j.title)}</a><span class="num">#${j.id}</span></div>
     <div class="tags">${j.track ? `<span class="tag ${esc(j.track)}">${esc(j.track)}</span>` : ""}
       ${j.company ? `<span class="tag co">${esc(j.company)}</span>` : ""}<span class="tag">${esc(j.site)}</span>${j.location ? `<span class="tag loc">${esc(j.location)}</span>` : ""}
       ${j.salary ? `<span class="tag sal">${esc(j.salary)}</span>` : ""}
       ${j.status ? `<span class="tag status">${esc(j.status)}</span>` : ""}</div>
+    ${j.excluded ? `<div class="excl">Excluded: ${esc(j.excluded)}</div>` : ""}
     ${j.keywords ? `<div class="kw">${esc(j.keywords)}</div>` : ""}
     ${j.reasoning ? `<div class="why">${esc(j.reasoning)}</div>` : ""}
     <div class="actions"><a class="link" target="_blank" href="${esc(j.apply_url)}">Open posting</a>${resume}${cover}
@@ -380,7 +386,7 @@ function render() {
   const d = state.data; if (!d) return;
   renderStats(d.stats);
   const shown = d.jobs.filter(visible);
-  $("count").textContent = `Showing ${shown.length} of ${d.jobs.length} scored jobs`;
+  $("count").textContent = `Showing ${shown.length} of ${d.jobs.length} jobs`;
   $("grid").innerHTML = shown.map(j => card(j, d.statuses)).join("");
   document.querySelectorAll("details[open]").forEach(loadDesc);
 }
@@ -412,6 +418,7 @@ document.addEventListener("click", (e) => {
 document.addEventListener("change", (e) => {
   if (e.target.matches("select.status")) setStatus(Number(e.target.dataset.id), e.target.value);
   if (e.target.id === "statusFilter") { state.status = e.target.value; render(); }
+  if (e.target.id === "showExcluded") { state.showExcluded = e.target.checked; render(); }
 });
 document.addEventListener("toggle", (e) => {
   if (e.target.tagName !== "DETAILS") return;

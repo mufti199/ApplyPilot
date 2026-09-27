@@ -190,10 +190,14 @@ _ALL_COLUMNS: dict[str, str] = {
     # Same job posted more than once (other board or repost): rowid of the main copy
     "dedupe_key": "TEXT",
     "duplicate_of": "INTEGER",
+    # Employment filter: job board type, and why a job was excluded (NULL = kept)
+    "job_type": "TEXT",
+    "excluded_reason": "TEXT",
 }
 
-# Jobs the pipeline should work on (duplicates are handled through their main copy).
-ACTIVE_JOB_SQL = "duplicate_of IS NULL"
+# Jobs the pipeline should work on: not a duplicate (handled via its main copy)
+# and not excluded by the employment filter.
+ACTIVE_JOB_SQL = "(duplicate_of IS NULL AND excluded_reason IS NULL)"
 
 # Statuses a user can record for a job they handle themselves.
 TRACKING_STATUSES = ("applied", "skipped", "interviewing", "rejected", "offer", "cold-call")

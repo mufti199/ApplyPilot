@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 
 from applypilot.config import (
+    get_permanent_full_time_only,
     get_preferred_locations,
     get_resume_tracks,
     get_score_group_size,
@@ -19,6 +20,8 @@ from applypilot.config import (
 )
 from applypilot.database import get_connection, get_jobs_by_stage, mark_duplicates
 from applypilot.llm import DailyQuotaExceeded, get_client
+from applypilot.scoring.employment import LLM_EXCLUDED_TYPES, normalise_llm_employment
+from applypilot.scoring.employment import apply_rules as apply_employment_rules
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +50,8 @@ RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
 REASONING: [2-3 sentences explaining the score]
-COMPANY: [the employer's name exactly as the posting states it, or unknown]"""
+COMPANY: [the employer's name exactly as the posting states it, or unknown]
+EMPLOYMENT: [permanent full-time, contract, part-time, casual, temporary, internship, or unknown]"""
 
 MULTI_RESUME_SUFFIX = """
 
@@ -98,6 +102,7 @@ def _parse_score_response(response: str) -> dict:
     reasoning = response
     track = None
     company = ""
+    employment = None
 
     for line in response.split("\n"):
         line = line.strip()
@@ -115,9 +120,12 @@ def _parse_score_response(response: str) -> dict:
             reasoning = line.replace("REASONING:", "").strip()
         elif line.startswith("COMPANY:"):
             company = line.replace("COMPANY:", "").strip().strip("[]")
+        elif line.startswith("EMPLOYMENT:"):
+            employment = normalise_llm_employment(line.replace("EMPLOYMENT:", ""))
 
     return {"score": score, "keywords": keywords, "reasoning": reasoning, "track": track,
-            "company": None if company.lower() in ("", "unknown", "not stated", "n/a") else company}
+            "company": None if company.lower() in ("", "unknown", "not stated", "n/a") else company,
+            "employment": employment}
 
 
 def score_job(resumes: dict[str, str], job: dict) -> dict:
@@ -234,14 +242,22 @@ def _split_job_blocks(response: str) -> dict[int, str]:
     return blocks
 
 
-def _save_score(conn, url: str, result: dict) -> None:
-    """Persist one successful score and commit so it survives a crash."""
+def _save_score(conn, url: str, result: dict, exclude_non_permanent: bool = False) -> None:
+    """Persist one successful score and commit so it survives a crash.
+
+    With exclude_non_permanent, a job the scorer calls contract/part-time/etc.
+    is also excluded (kept in the DB, skipped by later stages).
+    """
     conn.execute(
         "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, resume_track = ?, "
         "company = COALESCE(company, ?) WHERE url = ?",
         (result["score"], f"{result['keywords']}\n{result['reasoning']}",
          datetime.now(UTC).isoformat(), result["track"], result.get("company"), url),
     )
+    employment = result.get("employment")
+    if exclude_non_permanent and employment in LLM_EXCLUDED_TYPES:
+        conn.execute("UPDATE jobs SET excluded_reason = ? WHERE url = ? AND excluded_reason IS NULL",
+                     (f"scorer says {employment}", url))
     conn.commit()
 
 
@@ -265,6 +281,9 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     log.info("Scoring with resume tracks: %s", ", ".join(resumes))
     conn = get_connection()
     dupes = mark_duplicates(conn)
+    permanent_only = get_permanent_full_time_only(search_cfg)
+    if permanent_only:
+        apply_employment_rules(conn)
     log.info("Duplicate postings: %d jobs are copies and will not be scored", dupes)
 
     if rescore:
@@ -312,7 +331,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
                 log.warning("[%d/%d] scoring failed, left unscored for retry: %s (%s)",
                             i, len(jobs), title, result["reasoning"])
                 continue
-            _save_score(conn, job["url"], result)
+            _save_score(conn, job["url"], result, exclude_non_permanent=permanent_only)
             scored += 1
             group_ok = True
             log.info("[%d/%d] score=%d track=%s  %s", i, len(jobs), result["score"], result["track"], title)

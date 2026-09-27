@@ -105,6 +105,12 @@ tailor_resumes: true
 # which helps on free tiers with daily request limits.
 score_jobs_per_request: 1
 
+# Keep only permanent full-time roles (default false). Contract, part-time,
+# casual and temporary jobs are excluded (kept in the DB, shown under
+# 'Show excluded' in the live dashboard).
+employment:
+  permanent_full_time_only: false
+
 # Discovery sources to run (all default to true when omitted)
 discovery_sources:
   jobspy: true        # Indeed, LinkedIn, etc. via JobSpy
