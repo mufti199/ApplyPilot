@@ -475,20 +475,13 @@ def doctor() -> None:
 
     # --- Tier 2 checks ---
     import os
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-3.5-flash-lite")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
-        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
-    else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+
+    from applypilot.llm import _detect_provider, provider_label
+    try:
+        base_url, model, _key = _detect_provider()
+        results.append(("LLM API key", ok_mark, f"{provider_label(base_url)} ({model})"))
+    except (RuntimeError, ValueError) as e:
+        results.append(("LLM API key", fail_mark, f"{e} (set it in ~/.applypilot/.env)"))
 
     # --- Tier 3 checks ---
     # Claude Code CLI

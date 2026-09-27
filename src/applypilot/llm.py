@@ -1,14 +1,17 @@
 """
 Unified LLM client for ApplyPilot.
 
-Auto-detects provider from environment:
+Provider comes from LLM_PROVIDER (gemini | openai | zai | local) when set,
+otherwise it is auto-detected from whichever key exists, in this order:
   GEMINI_API_KEY  -> Google Gemini (default: gemini-3.5-flash-lite)
   OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
-  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
+  ZAI_API_KEY     -> Z.ai GLM (default: glm-4.7-flash)
+  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint (overrides the above)
 
 LLM_MODEL env var overrides the model name for any provider.
 LLM_RPM env var caps requests per minute (pacing for free tiers).
 LLM_REASONING_EFFORT (low|medium|high) is sent as reasoning_effort when set.
+LLM_THINKING=off turns off Z.ai GLM's reasoning (fewer tokens, faster).
 """
 
 import logging
@@ -31,36 +34,43 @@ def _detect_provider() -> tuple[str, str, str]:
     Reads env at call time (not module import time) so that load_env() called
     in _bootstrap() is always visible here.
     """
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    local_url = os.environ.get("LLM_URL", "")
     model_override = os.environ.get("LLM_MODEL", "")
+    local_url = os.environ.get("LLM_URL", "")
+    choice = os.environ.get("LLM_PROVIDER", "").strip().lower()
 
-    if gemini_key and not local_url:
-        return (
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-            model_override or "gemini-3.5-flash-lite",
-            gemini_key,
+    if choice and choice not in _PROVIDERS:
+        raise ValueError(f"LLM_PROVIDER must be one of {', '.join(_PROVIDERS)}, got {choice!r}")
+    if not choice:
+        if local_url:
+            choice = "local"
+        else:
+            choice = next((p for p in ("gemini", "openai", "zai") if os.environ.get(_PROVIDERS[p][2])), "")
+    if not choice:
+        raise RuntimeError(
+            "No LLM provider configured. "
+            "Set GEMINI_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, or LLM_URL in your environment."
         )
 
-    if openai_key and not local_url:
-        return (
-            "https://api.openai.com/v1",
-            model_override or "gpt-4o-mini",
-            openai_key,
-        )
+    if choice == "local":
+        if not local_url:
+            raise RuntimeError("LLM_PROVIDER=local needs LLM_URL")
+        return local_url.rstrip("/"), model_override or "local-model", os.environ.get("LLM_API_KEY", "")
 
-    if local_url:
-        return (
-            local_url.rstrip("/"),
-            model_override or "local-model",
-            os.environ.get("LLM_API_KEY", ""),
-        )
+    base_url, default_model, key_var = _PROVIDERS[choice]
+    api_key = os.environ.get(key_var, "")
+    if not api_key:
+        raise RuntimeError(f"LLM_PROVIDER={choice} needs {key_var} in your environment")
+    return base_url, model_override or default_model, api_key
 
-    raise RuntimeError(
-        "No LLM provider configured. "
-        "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in your environment."
-    )
+
+# provider -> (OpenAI-compatible base URL, default model, API key env var)
+_PROVIDERS: dict[str, tuple[str, str, str]] = {
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash-lite", "GEMINI_API_KEY"),
+    "openai": ("https://api.openai.com/v1", "gpt-4o-mini", "OPENAI_API_KEY"),
+    "zai": ("https://api.z.ai/api/paas/v4", "glm-4.7-flash", "ZAI_API_KEY"),
+    "local": ("", "local-model", "LLM_API_KEY"),
+}
+_ZAI_BASE = _PROVIDERS["zai"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -89,11 +99,13 @@ class LLMClient:
     """
 
     def __init__(self, base_url: str, model: str, api_key: str, rpm: float | None = None,
-                 reasoning_effort: str | None = None) -> None:
+                 reasoning_effort: str | None = None, thinking_off: bool = False) -> None:
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
         self.reasoning_effort = reasoning_effort
+        # Z.ai GLM only: thinking={'type': 'disabled'} skips its hidden reasoning
+        self.thinking_off = thinking_off and base_url.startswith(_ZAI_BASE)
         self._client = httpx.Client(timeout=_TIMEOUT)
         # Pacing: minimum seconds between request starts, shared across threads
         self._min_interval = 60.0 / rpm if rpm else 0.0
@@ -192,6 +204,8 @@ class LLMClient:
         }
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
+        if self.thinking_off:
+            payload["thinking"] = {"type": "disabled"}
 
         self._wait_for_slot()
         resp = self._client.post(
@@ -297,11 +311,9 @@ class LLMClient:
         raise RuntimeError("LLM request failed after all retries")
 
     def _provider_name(self) -> str:
-        if self._is_gemini or self._use_native_gemini:
+        if self._use_native_gemini:
             return "Gemini"
-        if self.base_url.startswith("https://api.openai.com"):
-            return "OpenAI"
-        return f"LLM ({self.base_url})"
+        return provider_label(self.base_url)
 
     def ask(self, prompt: str, **kwargs) -> str:
         """Convenience: single user prompt -> assistant response."""
@@ -309,6 +321,17 @@ class LLMClient:
 
     def close(self) -> None:
         self._client.close()
+
+
+def provider_label(base_url: str) -> str:
+    """Human name for a provider base URL (used in logs and `applypilot doctor`)."""
+    if base_url.startswith(_GEMINI_COMPAT_BASE):
+        return "Gemini"
+    if base_url.startswith("https://api.openai.com"):
+        return "OpenAI"
+    if base_url.startswith(_ZAI_BASE):
+        return "Z.ai"
+    return f"Local ({base_url})"
 
 
 # Error codes where retrying cannot help (account/billing problems).
@@ -389,10 +412,22 @@ def get_client() -> LLMClient:
         base_url, model, api_key = _detect_provider()
         rpm = _read_rpm()
         effort = _read_reasoning_effort()
-        log.info("LLM provider: %s  model: %s  rpm_limit: %s  reasoning_effort: %s",
-                 base_url, model, rpm or "none", effort or "default")
-        _instance = LLMClient(base_url, model, api_key, rpm=rpm, reasoning_effort=effort)
+        thinking_off = _read_thinking_off()
+        log.info("LLM provider: %s  model: %s  rpm_limit: %s  reasoning_effort: %s  thinking: %s",
+                 base_url, model, rpm or "none", effort or "default", "off" if thinking_off else "default")
+        _instance = LLMClient(base_url, model, api_key, rpm=rpm, reasoning_effort=effort,
+                              thinking_off=thinking_off)
     return _instance
+
+
+def _read_thinking_off() -> bool:
+    """Parse LLM_THINKING (on|off, default on)."""
+    raw = os.environ.get("LLM_THINKING", "").strip().lower()
+    if raw in ("", "on"):
+        return False
+    if raw == "off":
+        return True
+    raise ValueError(f"LLM_THINKING must be on or off, got {raw!r}")
 
 
 _REASONING_EFFORTS = ("low", "medium", "high")

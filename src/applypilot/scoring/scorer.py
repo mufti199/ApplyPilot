@@ -58,7 +58,7 @@ MULTI_RESUME_SUFFIX = """
 MULTIPLE RESUMES:
 You are given several resumes for the same candidate, each labelled with a TRACK name.
 Pick the ONE resume that best fits this job and score the job against that resume only.
-Put this extra line FIRST in your response, before SCORE:
+Add this line directly before the SCORE line (for every job you score):
 TRACK: [exactly one of: {tracks}]"""
 
 
@@ -67,8 +67,10 @@ BATCH_SUFFIX = """
 MULTIPLE JOBS:
 You are given {count} job postings, labelled JOB 1 to JOB {count}. Evaluate each one
 independently against the resume(s); do not compare the jobs with each other.
-For EACH job, output one block that starts with a line "JOB: <number>" followed by the
-lines in the format above. Output the blocks in order, one per job, nothing else."""
+For EACH job, output one block that starts with a line "JOB: <number>" followed by all
+the lines in the format above (including TRACK, if asked for) for that job. Every block must
+contain all of its own lines; never share a line between jobs. Output the blocks in order,
+one per job, nothing else."""
 
 # Output budget per job in a grouped request (visible answer + model reasoning).
 _TOKENS_PER_JOB = 700
@@ -88,6 +90,12 @@ def _format_resumes(resumes: dict[str, str]) -> str:
     return "\n\n".join(f"RESUME (TRACK: {name}):\n{text}" for name, text in resumes.items())
 
 
+def _clean_line(line: str) -> str:
+    """Strip markdown decoration models add, e.g. '**SCORE:** 7' or '- TRACK : devops'."""
+    line = line.strip().lstrip("-*> ").replace("**", "").replace("__", "")
+    return re.sub(r"^([A-Z]+)\s*:", r"\1:", line)
+
+
 def _parse_score_response(response: str) -> dict:
     """Parse the LLM's score response into structured data.
 
@@ -105,7 +113,7 @@ def _parse_score_response(response: str) -> dict:
     employment = None
 
     for line in response.split("\n"):
-        line = line.strip()
+        line = _clean_line(line)
         if line.startswith("TRACK:"):
             track = line.replace("TRACK:", "").strip().strip("[]").lower() or None
         elif line.startswith("SCORE:"):
