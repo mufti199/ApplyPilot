@@ -36,8 +36,14 @@ def test_non_mapping_rejected():
 # -- _run_discover -----------------------------------------------------------
 
 @pytest.fixture
-def fake_runners(monkeypatch):
-    """Replace the three discovery runners with call recorders."""
+def fake_runners(monkeypatch, tmp_path):
+    """Replace the three discovery runners with call recorders, on a temp database."""
+    from applypilot import database
+
+    db_path = tmp_path / "jobs.db"
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    database.init_db(db_path)
+
     from applypilot.discovery import jobspy, smartextract, workday
 
     calls = []

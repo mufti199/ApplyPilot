@@ -387,7 +387,7 @@ def dedupe_key(title: str | None, description: str | None) -> str | None:
 
     Returns None when the description is too short to match safely.
     """
-    norm = lambda s: re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()  # noqa: E731
+    norm = lambda s: re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
     desc = norm(description)
     if len(desc) < _DEDUPE_MIN_DESCRIPTION or not norm(title):
         return None
