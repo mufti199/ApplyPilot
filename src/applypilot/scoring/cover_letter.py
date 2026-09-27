@@ -81,6 +81,7 @@ PARAGRAPH 1 (2-3 sentences): Open with a specific thing YOU built that solves TH
 PARAGRAPH 2 (3-4 sentences): Pick 2 achievements from the resume that are MOST relevant to THIS job. Use numbers. Frame as solving their problem, not listing your accomplishments.{projects_hint}{metrics_hint}
 
 PARAGRAPH 3 (1-2 sentences): One specific thing about the company from the job description (a product, a technical challenge, a team structure). Then close. "Happy to walk through any of this in more detail." or "Let's discuss." Nothing else.
+If COMPANY is "not stated", do not name or guess a company: refer to "your team" and use only details from the job description.
 
 BANNED WORDS AND PHRASES (automated validator rejects ANY of these — do not use even once):
 {all_banned}
@@ -145,7 +146,7 @@ def generate_cover_letter(
     """
     job_text = (
         f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
+        f"COMPANY: {job.get('company') or 'not stated'}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n\n"
         f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )

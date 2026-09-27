@@ -46,7 +46,8 @@ IMPORTANT FACTORS:
 RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
-REASONING: [2-3 sentences explaining the score]"""
+REASONING: [2-3 sentences explaining the score]
+COMPANY: [the employer's name exactly as the posting states it, or unknown]"""
 
 MULTI_RESUME_SUFFIX = """
 
@@ -96,6 +97,7 @@ def _parse_score_response(response: str) -> dict:
     keywords = ""
     reasoning = response
     track = None
+    company = ""
 
     for line in response.split("\n"):
         line = line.strip()
@@ -111,8 +113,11 @@ def _parse_score_response(response: str) -> dict:
             keywords = line.replace("KEYWORDS:", "").strip()
         elif line.startswith("REASONING:"):
             reasoning = line.replace("REASONING:", "").strip()
+        elif line.startswith("COMPANY:"):
+            company = line.replace("COMPANY:", "").strip().strip("[]")
 
-    return {"score": score, "keywords": keywords, "reasoning": reasoning, "track": track}
+    return {"score": score, "keywords": keywords, "reasoning": reasoning, "track": track,
+            "company": None if company.lower() in ("", "unknown", "not stated", "n/a") else company}
 
 
 def score_job(resumes: dict[str, str], job: dict) -> dict:
@@ -149,7 +154,7 @@ def score_job(resumes: dict[str, str], job: dict) -> dict:
 def _format_job(job: dict) -> str:
     return (
         f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
+        f"COMPANY: {job.get('company') or 'not stated'}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n\n"
         f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )
@@ -232,9 +237,10 @@ def _split_job_blocks(response: str) -> dict[int, str]:
 def _save_score(conn, url: str, result: dict) -> None:
     """Persist one successful score and commit so it survives a crash."""
     conn.execute(
-        "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, resume_track = ? WHERE url = ?",
+        "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, resume_track = ?, "
+        "company = COALESCE(company, ?) WHERE url = ?",
         (result["score"], f"{result['keywords']}\n{result['reasoning']}",
-         datetime.now(UTC).isoformat(), result["track"], url),
+         datetime.now(UTC).isoformat(), result["track"], result.get("company"), url),
     )
     conn.commit()
 

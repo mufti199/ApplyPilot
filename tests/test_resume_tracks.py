@@ -88,7 +88,8 @@ def test_multi_track_picks_track_from_response(monkeypatch):
 
     result = scorer.score_job(RESUMES, JOB)
 
-    assert result == {"score": 8, "keywords": "Terraform", "reasoning": "Good fit.", "track": "devops"}
+    assert result == {"score": 8, "keywords": "Terraform", "reasoning": "Good fit.", "track": "devops",
+                      "company": None}
     system, user = client.messages[0]["content"], client.messages[1]["content"]
     assert "software, devops" in system
     assert "RESUME (TRACK: software)" in user and "RESUME (TRACK: devops)" in user

@@ -52,7 +52,7 @@ def dashboard_data(conn=None) -> dict:
         "tracked": count("tracking_status IS NOT NULL"),
     }
     rows = conn.execute("""
-        SELECT rowid AS id, url, application_url, title, site, location, salary,
+        SELECT rowid AS id, url, application_url, title, company, site, location, salary,
                fit_score, score_reasoning, resume_track, tracking_status, tracking_updated_at,
                cover_letter_path, discovered_at, scored_at
         FROM jobs WHERE fit_score IS NOT NULL
@@ -68,6 +68,7 @@ def dashboard_data(conn=None) -> dict:
             "apply_url": r["application_url"] or r["url"],
             "title": r["title"] or "Untitled",
             "site": r["site"] or "",
+            "company": r["company"] or "",
             "location": r["location"] or "",
             "salary": r["salary"] or "",
             "score": r["fit_score"],
@@ -270,6 +271,7 @@ PAGE = """<!DOCTYPE html>
   .tag.software { background: #312e81; color: #c7d2fe; } .tag.devops { background: #064e3b; color: #6ee7b7; }
   .tag.loc { background: #1e3a5f; color: #93c5fd; } .tag.sal { background: #3f3f46; color: #fde68a; }
   .tag.status { background: #7c2d12; color: #fed7aa; }
+  .tag.co { background: #475569; color: #f1f5f9; font-weight: 600; }
   .kw { font-size: .75rem; color: #10b981; margin-bottom: .3rem; }
   .why { font-size: .75rem; color: #94a3b8; font-style: italic; margin-bottom: .6rem; line-height: 1.4; }
   .actions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
@@ -341,7 +343,7 @@ function visible(j) {
   if (state.status === "open" && (j.status === "applied" || j.status === "skipped")) return false;
   if (state.status === "none" && j.status) return false;
   if (state.status && !["open", "none"].includes(state.status) && j.status !== state.status) return false;
-  if (state.q) { const hay = (j.title + " " + j.site + " " + j.location + " " + j.keywords).toLowerCase();
+  if (state.q) { const hay = (j.title + " " + j.company + " " + j.site + " " + j.location + " " + j.keywords).toLowerCase();
     if (!hay.includes(state.q)) return false; }
   return true;
 }
@@ -356,7 +358,7 @@ function card(j, statuses) {
     <div class="head"><span class="pill" style="background:${color(j.score)}">${j.score}</span>
       <a class="title" target="_blank" href="${esc(j.url)}">${esc(j.title)}</a><span class="num">#${j.id}</span></div>
     <div class="tags">${j.track ? `<span class="tag ${esc(j.track)}">${esc(j.track)}</span>` : ""}
-      <span class="tag">${esc(j.site)}</span>${j.location ? `<span class="tag loc">${esc(j.location)}</span>` : ""}
+      ${j.company ? `<span class="tag co">${esc(j.company)}</span>` : ""}<span class="tag">${esc(j.site)}</span>${j.location ? `<span class="tag loc">${esc(j.location)}</span>` : ""}
       ${j.salary ? `<span class="tag sal">${esc(j.salary)}</span>` : ""}
       ${j.status ? `<span class="tag status">${esc(j.status)}</span>` : ""}</div>
     ${j.keywords ? `<div class="kw">${esc(j.keywords)}</div>` : ""}
