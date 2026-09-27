@@ -56,7 +56,7 @@ def dashboard_data(conn=None) -> dict:
     rows = conn.execute("""
         SELECT rowid AS id, url, application_url, title, company, site, location, salary,
                fit_score, score_reasoning, resume_track, tracking_status, tracking_updated_at,
-               cover_letter_path, discovered_at, scored_at, excluded_reason
+               cover_letter_path, discovered_at, scored_at, excluded_reason, scored_by
         FROM jobs WHERE duplicate_of IS NULL AND (fit_score IS NOT NULL OR excluded_reason IS NOT NULL)
         ORDER BY fit_score DESC NULLS LAST, scored_at DESC
     """).fetchall()
@@ -86,6 +86,7 @@ def dashboard_data(conn=None) -> dict:
             "has_cover_letter": bool(_cover_pdf_path(r["cover_letter_path"])),
             "scored_at": r["scored_at"],
             "also_on": copies.get(r["id"], []),
+            "scored_by": r["scored_by"],
         })
     return {"stats": stats, "jobs": jobs, "statuses": list(TRACKING_STATUSES)}
 
@@ -278,6 +279,7 @@ PAGE = """<!DOCTYPE html>
   .tag.software { background: #312e81; color: #c7d2fe; } .tag.devops { background: #064e3b; color: #6ee7b7; }
   .tag.loc { background: #1e3a5f; color: #93c5fd; } .tag.sal { background: #3f3f46; color: #fde68a; }
   .tag.status { background: #7c2d12; color: #fed7aa; }
+  .tag.model { background: transparent; color: #64748b; border: 1px solid #334155; }
   .tag.co { background: #475569; color: #f1f5f9; font-weight: 600; }
   .excl { font-size: .75rem; color: #fca5a5; margin-bottom: .3rem; }
   .also { font-size: .75rem; color: #94a3b8; margin-top: .5rem; } .also a { color: #93c5fd; }
@@ -371,7 +373,8 @@ function card(j, statuses) {
     <div class="tags">${j.track ? `<span class="tag ${esc(j.track)}">${esc(j.track)}</span>` : ""}
       ${j.company ? `<span class="tag co">${esc(j.company)}</span>` : ""}<span class="tag">${esc(j.site)}</span>${j.location ? `<span class="tag loc">${esc(j.location)}</span>` : ""}
       ${j.salary ? `<span class="tag sal">${esc(j.salary)}</span>` : ""}
-      ${j.status ? `<span class="tag status">${esc(j.status)}</span>` : ""}</div>
+      ${j.status ? `<span class="tag status">${esc(j.status)}</span>` : ""}
+      ${j.scored_by ? `<span class="tag model" title="scored by">${esc(j.scored_by)}</span>` : ""}</div>
     ${j.excluded ? `<div class="excl">Excluded: ${esc(j.excluded)}</div>` : ""}
     ${j.keywords ? `<div class="kw">${esc(j.keywords)}</div>` : ""}
     ${j.reasoning ? `<div class="why">${esc(j.reasoning)}</div>` : ""}

@@ -175,7 +175,21 @@ def score_job(resumes: dict[str, str], job: dict, guides: dict[str, str] | None 
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}", "track": None}
 
-    return _check_track(_parse_score_response(response), resumes, job)
+    result = _check_track(_parse_score_response(response), resumes, job)
+    if result["score"] == 0 and hasattr(client, "chat_fallback"):
+        # The main model answered but the reply was unusable: ask the fallback once.
+        log.warning("Unreadable score reply for '%s' from %s; asking fallback",
+                    job.get("title", "?"), getattr(client, "last_model", "?"))
+        try:
+            response = client.chat_fallback(messages, max_tokens=_SINGLE_JOB_TOKENS, temperature=0.2)
+        except Exception as e:  # fallback unavailable/failed: keep the original failure
+            log.warning("Fallback could not score '%s': %s", job.get("title", "?"), e)
+            return result
+        result = _check_track(_parse_score_response(response), resumes, job)
+
+    if result["score"]:
+        result["model"] = getattr(client, "last_model", None) or getattr(client, "model", None)
+    return result
 
 
 def _format_job(job: dict) -> str:
@@ -222,7 +236,8 @@ def score_jobs(resumes: dict[str, str], jobs: list[dict],
     ]
 
     try:
-        response = get_client().chat(messages, max_tokens=_TOKENS_PER_JOB * len(jobs), temperature=0.2)
+        client = get_client()
+        response = client.chat(messages, max_tokens=_TOKENS_PER_JOB * len(jobs), temperature=0.2)
     except DailyQuotaExceeded:
         raise
     except Exception as e:
@@ -240,7 +255,10 @@ def score_jobs(resumes: dict[str, str], jobs: list[dict],
         if parsed["score"] == 0:
             results.append(_failure(f"JOB {n} had no usable SCORE in grouped reply"))
             continue
-        results.append(_check_track(parsed, resumes, job))
+        checked = _check_track(parsed, resumes, job)
+        if checked["score"]:
+            checked["model"] = getattr(client, "last_model", None) or getattr(client, "model", None)
+        results.append(checked)
     return results
 
 
@@ -270,9 +288,9 @@ def _save_score(conn, url: str, result: dict, exclude_non_permanent: bool = Fals
     """
     conn.execute(
         "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, resume_track = ?, "
-        "company = COALESCE(company, ?) WHERE url = ?",
+        "company = COALESCE(company, ?), scored_by = ? WHERE url = ?",
         (result["score"], f"{result['keywords']}\n{result['reasoning']}",
-         datetime.now(UTC).isoformat(), result["track"], result.get("company"), url),
+         datetime.now(UTC).isoformat(), result["track"], result.get("company"), result.get("model"), url),
     )
     employment = result.get("employment")
     if exclude_non_permanent and employment in LLM_EXCLUDED_TYPES:

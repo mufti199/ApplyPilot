@@ -12,6 +12,7 @@ LLM_MODEL env var overrides the model name for any provider.
 LLM_RPM env var caps requests per minute (pacing for free tiers).
 LLM_REASONING_EFFORT (low|medium|high) is sent as reasoning_effort when set.
 LLM_THINKING=off turns off Z.ai GLM's reasoning (fewer tokens, faster).
+LLM_FALLBACK_PROVIDER / LLM_FALLBACK_MODEL / LLM_FALLBACK_RPM: provider to retry on when the main one fails.
 """
 
 import logging
@@ -51,16 +52,32 @@ def _detect_provider() -> tuple[str, str, str]:
             "Set GEMINI_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, or LLM_URL in your environment."
         )
 
+    return _resolve_provider(choice, model_override, setting="LLM_PROVIDER")
+
+
+def _resolve_provider(choice: str, model_override: str, setting: str) -> tuple[str, str, str]:
+    """(base_url, model, api_key) for a named provider; setting names the env var for errors."""
     if choice == "local":
+        local_url = os.environ.get("LLM_URL", "")
         if not local_url:
-            raise RuntimeError("LLM_PROVIDER=local needs LLM_URL")
+            raise RuntimeError(f"{setting}=local needs LLM_URL")
         return local_url.rstrip("/"), model_override or "local-model", os.environ.get("LLM_API_KEY", "")
 
     base_url, default_model, key_var = _PROVIDERS[choice]
     api_key = os.environ.get(key_var, "")
     if not api_key:
-        raise RuntimeError(f"LLM_PROVIDER={choice} needs {key_var} in your environment")
+        raise RuntimeError(f"{setting}={choice} needs {key_var} in your environment")
     return base_url, model_override or default_model, api_key
+
+
+def _detect_fallback() -> tuple[str, str, str] | None:
+    """Fallback provider from LLM_FALLBACK_PROVIDER / LLM_FALLBACK_MODEL, or None if unset."""
+    choice = os.environ.get("LLM_FALLBACK_PROVIDER", "").strip().lower()
+    if not choice:
+        return None
+    if choice not in _PROVIDERS:
+        raise ValueError(f"LLM_FALLBACK_PROVIDER must be one of {', '.join(_PROVIDERS)}, got {choice!r}")
+    return _resolve_provider(choice, os.environ.get("LLM_FALLBACK_MODEL", ""), setting="LLM_FALLBACK_PROVIDER")
 
 
 # provider -> (OpenAI-compatible base URL, default model, API key env var)
@@ -405,8 +422,12 @@ class _GeminiCompatForbidden(Exception):
 _instance: LLMClient | None = None
 
 
-def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
+def get_client() -> "LLMClient | FallbackClient":
+    """Return (or create) the module-level client singleton.
+
+    With LLM_FALLBACK_PROVIDER set, this is a FallbackClient wrapping the main
+    provider and the fallback one.
+    """
     global _instance
     if _instance is None:
         base_url, model, api_key = _detect_provider()
@@ -415,9 +436,88 @@ def get_client() -> LLMClient:
         thinking_off = _read_thinking_off()
         log.info("LLM provider: %s  model: %s  rpm_limit: %s  reasoning_effort: %s  thinking: %s",
                  base_url, model, rpm or "none", effort or "default", "off" if thinking_off else "default")
-        _instance = LLMClient(base_url, model, api_key, rpm=rpm, reasoning_effort=effort,
-                              thinking_off=thinking_off)
+        primary = LLMClient(base_url, model, api_key, rpm=rpm, reasoning_effort=effort,
+                            thinking_off=thinking_off)
+
+        fallback_cfg = _detect_fallback()
+        if fallback_cfg is None:
+            _instance = primary
+        else:
+            fb_url, fb_model, fb_key = fallback_cfg
+            fb_rpm = _read_rpm("LLM_FALLBACK_RPM")
+            log.info("LLM fallback: %s  model: %s  rpm_limit: %s", fb_url, fb_model, fb_rpm or "none")
+            fallback = LLMClient(fb_url, fb_model, fb_key, rpm=fb_rpm, reasoning_effort=effort)
+            _instance = FallbackClient(primary, fallback)
     return _instance
+
+
+class FallbackClient:
+    """Try the main provider; on failure, send the same request to the fallback.
+
+    - A provider that reports its daily quota is used up is skipped for the rest
+      of the process.
+    - When both are unavailable, DailyQuotaExceeded is raised (so runs stop
+      cleanly) if that is why; otherwise the main provider's error is raised.
+    - `last_model` names the model that produced the last reply.
+    """
+
+    _FAILURES = (RuntimeError, httpx.HTTPError)
+
+    def __init__(self, primary: "LLMClient", fallback: "LLMClient") -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.model = primary.model
+        self.last_model: str | None = None
+        self._primary_out = False    # primary's daily quota used up
+        self._fallback_out = False   # fallback's daily quota used up
+        self._lock = threading.Lock()
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        if not self._primary_out:
+            try:
+                reply = self.primary.chat(messages, **kwargs)
+                self.last_model = self.primary.model
+                return reply
+            except DailyQuotaExceeded as e:
+                with self._lock:
+                    self._primary_out = True
+                log.warning("Main model %s is out of daily quota; using fallback %s from now on",
+                            self.primary.model, self.fallback.model)
+                primary_error: Exception = e
+            except self._FAILURES as e:
+                log.warning("Main model %s failed (%s); retrying on fallback %s",
+                            self.primary.model, e, self.fallback.model)
+                primary_error = e
+        else:
+            primary_error = DailyQuotaExceeded(f"Main model {self.primary.model} is out of daily quota")
+        return self._use_fallback(messages, kwargs, primary_error)
+
+    def chat_fallback(self, messages: list[dict], **kwargs) -> str:
+        """Ask the fallback directly (e.g. when the main model's reply was unreadable)."""
+        return self._use_fallback(messages, kwargs, RuntimeError("main model reply was unusable"))
+
+    def _use_fallback(self, messages: list[dict], kwargs: dict, primary_error: Exception) -> str:
+        if self._fallback_out:
+            raise primary_error
+        try:
+            reply = self.fallback.chat(messages, **kwargs)
+        except DailyQuotaExceeded as e:
+            with self._lock:
+                self._fallback_out = True
+            log.warning("Fallback model %s is out of daily quota; fallback disabled for this run",
+                        self.fallback.model)
+            if isinstance(primary_error, DailyQuotaExceeded):
+                raise DailyQuotaExceeded(f"{primary_error}; fallback also out of quota: {e}") from e
+            raise primary_error from e
+        self.last_model = self.fallback.model
+        return reply
+
+    def ask(self, prompt: str, **kwargs) -> str:
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+
+    def close(self) -> None:
+        self.primary.close()
+        self.fallback.close()
 
 
 def _read_thinking_off() -> bool:
@@ -445,15 +545,15 @@ def _read_reasoning_effort() -> str | None:
     return raw
 
 
-def _read_rpm() -> float | None:
-    """Parse LLM_RPM from the environment. Unset/empty -> no pacing."""
-    raw = os.environ.get("LLM_RPM", "").strip()
+def _read_rpm(var: str = "LLM_RPM") -> float | None:
+    """Parse a requests-per-minute env var (LLM_RPM by default). Unset/empty -> no pacing."""
+    raw = os.environ.get(var, "").strip()
     if not raw:
         return None
     try:
         rpm = float(raw)
     except ValueError:
-        raise ValueError(f"LLM_RPM must be a number, got {raw!r}") from None
+        raise ValueError(f"{var} must be a number, got {raw!r}") from None
     if rpm <= 0:
-        raise ValueError(f"LLM_RPM must be greater than 0, got {raw!r}")
+        raise ValueError(f"{var} must be greater than 0, got {raw!r}")
     return rpm

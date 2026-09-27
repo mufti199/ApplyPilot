@@ -166,6 +166,7 @@ _ALL_COLUMNS: dict[str, str] = {
     "score_reasoning": "TEXT",
     "scored_at": "TEXT",
     "resume_track": "TEXT",
+    "scored_by": "TEXT",
     # Tailoring
     "tailored_resume_path": "TEXT",
     "tailored_at": "TEXT",
