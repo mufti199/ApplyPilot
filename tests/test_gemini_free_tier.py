@@ -151,7 +151,7 @@ def jobs_db(tmp_path, monkeypatch):
 def test_scoring_starts_with_preferred_locations(jobs_db, monkeypatch):
     seen = []
 
-    def fake(resumes, job):
+    def fake(resumes, job, guides=None):
         seen.append(job["url"])
         return {"score": 7, "keywords": "", "reasoning": "", "track": "software"}
 
@@ -165,7 +165,7 @@ def test_scoring_starts_with_preferred_locations(jobs_db, monkeypatch):
 def test_scoring_stops_on_daily_quota_and_keeps_earlier_scores(jobs_db, monkeypatch):
     calls = []
 
-    def fake(resumes, job):
+    def fake(resumes, job, guides=None):
         calls.append(job["url"])
         if len(calls) == 2:
             raise DailyQuotaExceeded("daily quota reached")

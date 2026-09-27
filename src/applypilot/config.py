@@ -228,12 +228,13 @@ def get_tailor_resumes(search_cfg: dict | None) -> bool:
 _TRACK_NAME_RE = r"^[a-z0-9_-]+$"
 
 
-def get_resume_tracks(search_cfg: dict | None) -> dict[str, dict[str, Path | None]]:
-    """Return the resume tracks: {track_name: {"text": Path, "pdf": Path | None}}.
+def get_resume_tracks(search_cfg: dict | None) -> dict[str, dict]:
+    """Return the resume tracks: {track_name: {"text": Path, "pdf": Path | None, "focus": str | None}}.
 
     Reads the optional `resumes` mapping from the search config, e.g.
         resumes:
-          software: {text: ".../resume_software.txt", pdf: ".../resume.pdf"}
+          software: {text: ".../resume_software.txt", pdf: ".../resume.pdf",
+                     focus: "application, backend and AI roles"}
     Without it, falls back to a single "default" track using resume.txt/.pdf.
 
     Raises:
@@ -244,7 +245,7 @@ def get_resume_tracks(search_cfg: dict | None) -> dict[str, dict[str, Path | Non
     raw = (search_cfg or {}).get("resumes")
     if raw is None:
         pdf = RESUME_PDF_PATH if RESUME_PDF_PATH.exists() else None
-        return {"default": {"text": RESUME_PATH, "pdf": pdf}}
+        return {"default": {"text": RESUME_PATH, "pdf": pdf, "focus": None}}
     if not isinstance(raw, dict) or not raw:
         raise TypeError("resumes must be a non-empty mapping of track name to {text, pdf}")
 
@@ -260,13 +261,16 @@ def get_resume_tracks(search_cfg: dict | None) -> dict[str, dict[str, Path | Non
         pdf = entry.get("pdf")
         if pdf is not None and not isinstance(pdf, str):
             raise TypeError(f"resumes.{name}.pdf must be a file path")
+        focus = entry.get("focus")
+        if focus is not None and (not isinstance(focus, str) or not focus.strip()):
+            raise TypeError(f"resumes.{name}.focus must be a short non-empty description")
 
         text_path = Path(text).expanduser()
         pdf_path = Path(pdf).expanduser() if pdf else None
         for label, path in (("text", text_path), ("pdf", pdf_path)):
             if path is not None and not path.is_file():
                 raise FileNotFoundError(f"resumes.{name}.{label} not found: {path}")
-        tracks[name] = {"text": text_path, "pdf": pdf_path}
+        tracks[name] = {"text": text_path, "pdf": pdf_path, "focus": focus.strip() if focus else None}
     return tracks
 
 

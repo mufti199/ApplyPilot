@@ -144,7 +144,7 @@ def test_run_scoring_applies_rules_first_when_enabled(conn, monkeypatch, tmp_pat
     monkeypatch.setattr(scorer, "get_resume_tracks", lambda _c: {"software": {"text": resume, "pdf": None}})
     seen = []
 
-    def fake(resumes, job):
+    def fake(resumes, job, guides=None):
         seen.append(job["url"])
         return {"score": 7, "keywords": "", "reasoning": "", "track": "software", "company": None, "employment": None}
 

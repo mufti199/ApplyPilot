@@ -45,6 +45,8 @@ IMPORTANT FACTORS:
 - Consider transferable experience (automation, scripting, API work)
 - Factor in the candidate's project experience
 - Be realistic about experience level vs. job requirements (years of experience, seniority)
+- Hard requirements the candidate clearly lacks (citizenship or security clearance, mandatory
+  certifications or licences, far more seniority) are major gaps: score them as such
 
 RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]
@@ -58,6 +60,7 @@ MULTI_RESUME_SUFFIX = """
 MULTIPLE RESUMES:
 You are given several resumes for the same candidate, each labelled with a TRACK name.
 Pick the ONE resume that best fits this job and score the job against that resume only.
+Decide by the job's main day-to-day duties, not by its title or the order the resumes are listed.{guide}
 Add this line directly before the SCORE line (for every job you score):
 TRACK: [exactly one of: {tracks}]"""
 
@@ -74,13 +77,21 @@ one per job, nothing else."""
 
 # Output budget per job in a grouped request (visible answer + model reasoning).
 _TOKENS_PER_JOB = 700
+# Output budget for a single-job request; reasoning models need room before the answer.
+_SINGLE_JOB_TOKENS = 4096
 
 
-def _build_score_prompt(track_names: list[str]) -> str:
-    """Return the scoring system prompt for one or more resume tracks."""
+def _build_score_prompt(track_names: list[str], guides: dict[str, str] | None = None) -> str:
+    """Return the scoring system prompt for one or more resume tracks.
+
+    guides maps a track name to the kind of roles it is for (from `focus` in
+    searches.yaml); it is shown to the model to help it pick the right resume.
+    """
     if len(track_names) == 1:
         return SCORE_PROMPT
-    return SCORE_PROMPT + MULTI_RESUME_SUFFIX.format(tracks=", ".join(track_names))
+    lines = [f"- {name}: {guides[name]}" for name in track_names if guides and guides.get(name)]
+    guide = ("\nWhich TRACK fits which roles:\n" + "\n".join(lines)) if lines else ""
+    return SCORE_PROMPT + MULTI_RESUME_SUFFIX.format(tracks=", ".join(track_names), guide=guide)
 
 
 def _format_resumes(resumes: dict[str, str]) -> str:
@@ -136,7 +147,7 @@ def _parse_score_response(response: str) -> dict:
             "employment": employment}
 
 
-def score_job(resumes: dict[str, str], job: dict) -> dict:
+def score_job(resumes: dict[str, str], job: dict, guides: dict[str, str] | None = None) -> dict:
     """Score a single job against the best-fitting resume.
 
     Args:
@@ -151,13 +162,13 @@ def score_job(resumes: dict[str, str], job: dict) -> dict:
     job_text = _format_job(job)
 
     messages = [
-        {"role": "system", "content": _build_score_prompt(track_names)},
+        {"role": "system", "content": _build_score_prompt(track_names, guides)},
         {"role": "user", "content": f"{_format_resumes(resumes)}\n\n---\n\nJOB POSTING:\n{job_text}"},
     ]
 
     try:
         client = get_client()
-        response = client.chat(messages, max_tokens=1024, temperature=0.2)
+        response = client.chat(messages, max_tokens=_SINGLE_JOB_TOKENS, temperature=0.2)
     except DailyQuotaExceeded:
         raise  # run_scoring stops the whole run
     except Exception as e:
@@ -192,7 +203,8 @@ def _check_track(result: dict, resumes: dict[str, str], job: dict) -> dict:
     return result
 
 
-def score_jobs(resumes: dict[str, str], jobs: list[dict]) -> list[dict]:
+def score_jobs(resumes: dict[str, str], jobs: list[dict],
+               guides: dict[str, str] | None = None) -> list[dict]:
     """Score a group of jobs in one LLM request; one result per job, in order.
 
     A group of one uses score_job. Jobs missing or unreadable in the reply get
@@ -200,9 +212,9 @@ def score_jobs(resumes: dict[str, str], jobs: list[dict]) -> list[dict]:
     the whole group. DailyQuotaExceeded is re-raised for run_scoring.
     """
     if len(jobs) == 1:
-        return [score_job(resumes, jobs[0])]
+        return [score_job(resumes, jobs[0], guides)]
 
-    system = _build_score_prompt(list(resumes)) + BATCH_SUFFIX.format(count=len(jobs))
+    system = _build_score_prompt(list(resumes), guides) + BATCH_SUFFIX.format(count=len(jobs))
     postings = "\n\n".join(f"JOB {n}:\n{_format_job(job)}" for n, job in enumerate(jobs, start=1))
     messages = [
         {"role": "system", "content": system},
@@ -286,6 +298,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     search_cfg = load_search_config()
     tracks = get_resume_tracks(search_cfg)
     resumes = {name: t["text"].read_text(encoding="utf-8") for name, t in tracks.items()}
+    guides = {name: t["focus"] for name, t in tracks.items() if t.get("focus")}
     log.info("Scoring with resume tracks: %s", ", ".join(resumes))
     conn = get_connection()
     dupes = mark_duplicates(conn)
@@ -323,7 +336,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     for start in range(0, len(jobs), group_size):
         group = jobs[start:start + group_size]
         try:
-            results = score_jobs(resumes, group)
+            results = score_jobs(resumes, group, guides)
         except DailyQuotaExceeded as e:
             aborted = True
             log.error("Scoring stopped: %s (%d scored this run, %d left unscored)",

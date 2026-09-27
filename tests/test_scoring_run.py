@@ -42,7 +42,7 @@ def _fake_scores(monkeypatch, results):
     """Make score_job return the given results in order; returns the URLs it was called with."""
     seen = []
 
-    def fake(resumes, job):
+    def fake(resumes, job, guides=None):
         seen.append(job["url"])
         return dict(results[len(seen) - 1])
 
@@ -128,7 +128,7 @@ def test_score_committed_before_later_abort(db_path, monkeypatch):
 def test_score_committed_before_crash(db_path, monkeypatch):
     calls = []
 
-    def fake(resumes, job):
+    def fake(resumes, job, guides=None):
         calls.append(job["url"])
         if len(calls) == 2:
             raise KeyboardInterrupt

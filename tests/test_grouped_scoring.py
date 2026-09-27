@@ -138,7 +138,7 @@ def db(tmp_path, monkeypatch):
 def test_run_scoring_groups_jobs(db, monkeypatch):
     sizes = []
 
-    def fake(resumes, jobs):
+    def fake(resumes, jobs, guides=None):
         sizes.append(len(jobs))
         return [{"score": 7, "keywords": "", "reasoning": "", "track": "software"} for _ in jobs]
 
@@ -150,7 +150,7 @@ def test_run_scoring_groups_jobs(db, monkeypatch):
 
 
 def test_partial_group_saves_successes_and_resets_failure_count(db, monkeypatch):
-    def fake(resumes, jobs):
+    def fake(resumes, jobs, guides=None):
         return [{"score": 0 if n == 0 else 6, "keywords": "", "reasoning": "x", "track": "software"}
                 for n, _ in enumerate(jobs)]
 
@@ -163,7 +163,7 @@ def test_partial_group_saves_successes_and_resets_failure_count(db, monkeypatch)
 def test_quota_mid_run_keeps_earlier_groups(db, monkeypatch):
     calls = []
 
-    def fake(resumes, jobs):
+    def fake(resumes, jobs, guides=None):
         calls.append(jobs)
         if len(calls) == 2:
             raise DailyQuotaExceeded("daily")
